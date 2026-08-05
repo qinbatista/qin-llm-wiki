@@ -9,7 +9,7 @@ This is the mandatory entry contract for every AI that reads or writes this vaul
 - `Knowledge/`: current cross-project engineering and operating knowledge.
 - `Skills/`: current reusable capability and Skill contracts.
 - `AI Memory/events.jsonl`: the only writable project/module chronology.
-- `AI Memory/ai_memory.py`: the only supported history writer, query, and renderer.
+- `AI Memory/ai_memory.py`: the only supported history writer, bounded personal-memory candidate writer, query, and renderer.
 - `Recent Work.md`: generated 30-day daily/project overview.
 - `Issues.md`: generated active, monitoring, and recently resolved Bug view.
 - `Memory Dashboard.md`: generated project/module coverage.
@@ -39,6 +39,7 @@ Do not load complete event storage, generated dashboards, broad Skill records, o
 ## One outcome, one event
 
 - Record exactly one event after a durable user-visible outcome.
+- Ending may use `capture-memory` for a sanitized preference or technical-working-trait bundle; an empty bundle is a strict no-op.
 - Put every affected module in that event with repeated `--module-change MODULE=SUMMARY` values.
 - Reuse one stable `--issue-id` for the same Bug so a retry updates the lifecycle row and increments `attempt_count`.
 - Use `amend` to add missing files, evidence, decisions, or risks without appending another event.

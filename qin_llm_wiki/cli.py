@@ -9,7 +9,7 @@ from pathlib import Path
 PACKAGE_ROOT = Path(__file__).resolve().parent
 TEMPLATE_ROOT = PACKAGE_ROOT / "templates" / "vault"
 MANAGED_FILES = ("AGENTS.md", "CLAUDE.md", "instruction.md", "AI Memory/ai_memory.py", "AI Memory/memory_lint.py", "AI Memory/tests/test_ai_memory.py")
-SEED_FILES = ("Start Here.md", "Projects/index.md", "Knowledge/index.md", "Knowledge/Project Learning.md", "Knowledge/Privacy and Safety.md", "Preferences/index.md", "Skills/index.md")
+SEED_FILES = ("Start Here.md", "Projects/index.md", "Knowledge/index.md", "Knowledge/Project Learning.md", "Knowledge/Privacy and Safety.md", "Preferences/index.md", "Preferences/AI Captured Preferences.md", "Skills/index.md")
 REQUIRED_ROOT_ENTRIES = ("AGENTS.md", "CLAUDE.md", "instruction.md", "Start Here.md", "Recent Work.md", "Issues.md", "Memory Dashboard.md", "AI Memory", "Projects", "Knowledge", "Preferences", "Skills")
 REQUIRED_RUNTIME_FILES = ("AI Memory/ai_memory.py", "AI Memory/memory_lint.py", "AI Memory/tests/test_ai_memory.py", "AI Memory/events.jsonl")
 FORBIDDEN_ENTRIES = ("_System", "raw", "Journal", "Archive")

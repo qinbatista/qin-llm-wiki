@@ -32,6 +32,7 @@ class WikiGeneratorTests(unittest.TestCase):
         self.assertEqual(set(architecture_signature(self.vault_path)["root"]), set(REQUIRED_ROOT_ENTRIES))
         self.assertFalse((self.vault_path / "Archive").exists())
         self.assertFalse((self.vault_path / "Journal").exists())
+        self.assertTrue((self.vault_path / "Preferences" / "AI Captured Preferences.md").is_file())
 
     def test_runtime_records_and_updates_one_issue(self):
         _write_architecture(self.vault_path, "Test Wiki", False)

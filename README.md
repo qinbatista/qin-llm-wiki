@@ -10,6 +10,7 @@ Most AI memory folders grow into duplicated daily logs, project logs, agent logs
 - one append/update event store for project and module chronology;
 - generated summaries instead of handwritten duplicate logs;
 - stable issue IDs so repeated Bug attempts update one lifecycle row;
+- bounded Ending candidates for durable personal preferences and technical working traits, with a strict no-op when no candidate exists;
 - a bounded AI query budget: one project, one module section, at most five events;
 - a privacy gate before anything is published.
 
@@ -84,6 +85,14 @@ python3 "path/to/MyWiki/AI Memory/ai_memory.py" search --project GameOne --modul
 ```
 
 Compact mode returns only the fields needed for AI recall and avoids sending full evidence arrays into the model context.
+
+Ending-confirmed personal memory uses a separate bounded candidate payload. If the payload is empty, nothing is written:
+
+```text
+python3 "path/to/MyWiki/AI Memory/ai_memory.py" capture-memory --candidate-file "path/to/candidates.json"
+```
+
+The runtime validates the candidate, writes one `preference` event, and updates the stable Preferences owner page without storing raw prompts, results, paths, or secrets.
 
 ## Update the architecture
 
