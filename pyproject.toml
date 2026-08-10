@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qin-llm-wiki"
-version = "1.0.0"
+version = "1.1.0"
 description = "A privacy-safe, AI-first Obsidian project memory architecture"
 readme = "README.md"
 requires-python = ">=3.9"
