@@ -10,12 +10,16 @@ from pathlib import Path
 from unittest import mock
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from hidden_process import hidden_process_options
+
+
 SCRIPT_PATH = Path(__file__).parents[1] / "ai_memory.py"
 SPECIFICATION = importlib.util.spec_from_file_location("ai_memory", SCRIPT_PATH)
 MEMORY = importlib.util.module_from_spec(SPECIFICATION)
 SPECIFICATION.loader.exec_module(MEMORY)
 VAULT_ROOT = SCRIPT_PATH.parents[1]
-TEST_CACHE_ROOT = Path(os.environ.get("QIN_LLM_WIKI_TEST_CACHE", VAULT_ROOT / "Cache" / "tests" / "ai-memory-runtime"))
+TEST_CACHE_ROOT = Path(os.environ.get("QIN_LLM_WIKI_TEST_CACHE", VAULT_ROOT / "Cache" / "tmp-ai-memory-runtime")).expanduser().resolve()
 
 
 class AIMemoryTests(unittest.TestCase):
@@ -37,6 +41,69 @@ class AIMemoryTests(unittest.TestCase):
             link_path.symlink_to(target_path.resolve())
         except (NotImplementedError, OSError) as error:
             self.skipTest(f"symlink creation is unavailable: {error}")
+
+    def test_search_requires_project_unless_explicit_audit(self):
+        with self.assertRaisesRegex(ValueError, "project is required"):
+            MEMORY.search_events(events_path=self.store)
+        self.assertEqual(MEMORY.search_events(events_path=self.store, all_projects=True)["matches"], [])
+
+    def test_recall_is_project_scoped_and_bounded(self):
+        for project in ("GameOne", "GameTwo"):
+            MEMORY.add_project(project, self.case_root)
+            knowledge = self.case_root / "Projects" / project / "Knowledge.md"
+            knowledge.write_text(f"# {project}\n\n## Interface ownership\n{project} has a compact interface.\n\n## Storage\nUnrelated storage rule.\n", encoding="utf-8")
+            for number in range(7):
+                MEMORY.record_event(project, "ui", "architecture", f"Interface ownership change {number}", "Clarify interface ownership", f"Interface behavior {number} updated", "passed", events_path=self.store)
+        recalled = MEMORY.recall_project("GameOne", "ui", "interface", 100, self.case_root, self.store)
+        self.assertEqual(recalled["status"], "ok")
+        self.assertEqual(len(recalled["matches"]), 5)
+        self.assertTrue(all(row["project"] == "GameOne" for row in recalled["matches"]))
+        self.assertEqual(len(recalled["sections"]), 1)
+        self.assertNotIn("GameTwo", json.dumps(recalled))
+        self.assertNotIn("Unrelated storage", json.dumps(recalled))
+
+    def test_recall_missing_memory_skips_without_creating_files(self):
+        missing = self.case_root / "missing-vault"
+        result = MEMORY.recall_project("GameOne", vault_root=missing)
+        self.assertEqual((result["status"], result["reason"]), ("skipped", "memory-unavailable"))
+        self.assertFalse(missing.exists())
+        result = MEMORY.recall_project("AbsentProject", vault_root=self.case_root, events_path=self.store)
+        self.assertEqual((result["status"], result["reason"]), ("skipped", "no-related-memory"))
+        self.assertFalse(self.store.exists())
+
+    def test_recall_rejects_traversal_and_symlinked_projects(self):
+        for name in ("..", "../GameOne", "nested/GameOne", "nested\\GameOne"):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                MEMORY.recall_project(name, vault_root=self.case_root)
+        other = self.case_root / "other"
+        other.mkdir()
+        self._symlink_or_skip(other, self.case_root / "Projects" / "GameOne")
+        with self.assertRaisesRegex(ValueError, "symlinked"):
+            MEMORY.recall_project("GameOne", vault_root=self.case_root)
+
+    def test_legacy_coverage_migration_preserves_ids_files_and_is_idempotent(self):
+        first = {"coverage_schema": 1, "event": "scope-observed", "event_id": "coverage-row", "record": {"project_name": "GameOne", "scope_kind": "module", "module": "ui", "files": ["src/view.py"], "first_seen": "2026-08-01T10:00:00Z", "last_seen": "2026-08-01T10:00:00Z"}}
+        second = {**first, "record": {**first["record"], "files": ["src/state.py"]}}
+        MEMORY._write_events([first, second], self.store)
+        result = MEMORY.migrate_coverage(self.store)
+        self.assertEqual(result["migrated_rows"], 2)
+        rows = MEMORY._read_events(self.store)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["event_id"], "coverage-row")
+        self.assertEqual(set(rows[0]["files"]), {"src/view.py", "src/state.py"})
+        self.assertEqual(rows[0]["verification_status"], "not-run")
+        before = self.store.read_bytes()
+        self.assertEqual(MEMORY.migrate_coverage(self.store)["status"], "no-op")
+        self.assertEqual(before, self.store.read_bytes())
+
+    def test_legacy_coverage_conflicting_project_does_not_write(self):
+        row = {"coverage_schema": 1, "event": "scope-observed", "event_id": "coverage-row", "record": {"project_name": "GameOne", "scope_kind": "project"}}
+        other = {**row, "record": {**row["record"], "project_name": "GameTwo"}}
+        MEMORY._write_events([row, other], self.store)
+        before = self.store.read_bytes()
+        with self.assertRaisesRegex(ValueError, "conflicting project"):
+            MEMORY.migrate_coverage(self.store)
+        self.assertEqual(before, self.store.read_bytes())
 
     def test_repeated_issue_updates_one_row(self):
         first = MEMORY.record_event("GameOne", "combat.damage", "bug-fix", "Damage is wrong", "Multiplier ordering", "Monitoring remains active", "partial", issue_id="combat-001", issue_status="MONITORING", files=["src/combat.py"], events_path=self.store)
@@ -136,7 +203,7 @@ class AIMemoryTests(unittest.TestCase):
         event.update({"session_id": "11111111-1111-4111-8111-111111111111", "session_key": "", "task_name": "Legacy Task Label", "task_group": "Legacy Group Label", "task_scope_key": "", "task_group_key": "", "task_scope_mode": "unscoped"})
         MEMORY._write_events([event], self.store)
         command = [sys.executable, "-B", str(SCRIPT_PATH), "--store", str(self.store), "migrate-provenance"]
-        first = subprocess.run(command, cwd=self.case_root, text=True, capture_output=True, check=False)
+        first = subprocess.run(command, cwd=self.case_root, text=True, capture_output=True, check=False, **hidden_process_options())
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         self.assertEqual(json.loads(first.stdout)["status"], "migrated")
         migrated = MEMORY._read_events(self.store)[0]
@@ -149,7 +216,7 @@ class AIMemoryTests(unittest.TestCase):
         self.assertNotIn("task_group", migrated)
         self.assertNotIn("session_id", migrated)
         migrated_bytes = self.store.read_bytes()
-        second = subprocess.run(command, cwd=self.case_root, text=True, capture_output=True, check=False)
+        second = subprocess.run(command, cwd=self.case_root, text=True, capture_output=True, check=False, **hidden_process_options())
         self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
         self.assertEqual(json.loads(second.stdout)["status"], "no-op")
         self.assertEqual(self.store.read_bytes(), migrated_bytes)
@@ -174,7 +241,7 @@ class AIMemoryTests(unittest.TestCase):
         event["verification"] = [f"Stored {private_cookie}"]
         MEMORY._write_events([event], self.store)
         command = [sys.executable, "-B", str(SCRIPT_PATH), "--store", str(self.store), "redact-private", "--event-id", written["event_id"]]
-        completed = subprocess.run(command, cwd=self.case_root, text=True, capture_output=True, check=False)
+        completed = subprocess.run(command, cwd=self.case_root, text=True, capture_output=True, check=False, **hidden_process_options())
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
         output = json.loads(completed.stdout)
         redacted = MEMORY._read_events(self.store)[0]
@@ -191,7 +258,7 @@ class AIMemoryTests(unittest.TestCase):
         self.assertNotIn(private_path, completed.stdout + completed.stderr)
         self.assertNotIn(private_cookie, completed.stdout + completed.stderr)
         redacted_bytes = self.store.read_bytes()
-        repeated = subprocess.run(command, cwd=self.case_root, text=True, capture_output=True, check=False)
+        repeated = subprocess.run(command, cwd=self.case_root, text=True, capture_output=True, check=False, **hidden_process_options())
         self.assertEqual(repeated.returncode, 0, repeated.stdout + repeated.stderr)
         self.assertEqual(json.loads(repeated.stdout)["status"], "no-op")
         self.assertEqual(self.store.read_bytes(), redacted_bytes)
@@ -239,7 +306,7 @@ class AIMemoryTests(unittest.TestCase):
         MEMORY._write_events(events, self.store)
         original_bytes = self.store.read_bytes()
         command = [sys.executable, "-B", str(SCRIPT_PATH), "--store", str(self.store), "redact-private", "--event-id", target["event_id"]]
-        completed = subprocess.run(command, cwd=self.case_root, text=True, capture_output=True, check=False)
+        completed = subprocess.run(command, cwd=self.case_root, text=True, capture_output=True, check=False, **hidden_process_options())
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("semantic-duplicate-conflict", completed.stderr)
         self.assertIn(canonical["event_id"], completed.stderr)
@@ -273,7 +340,7 @@ class AIMemoryTests(unittest.TestCase):
     def test_amend_replace_file_cli_is_exact_and_normalized(self):
         written = MEMORY.record_event("GameOne", "combat.damage", "verification", "Verified file evidence", "Exercise exact file replacement", "Focused checks pass", "passed", files=["src/old.py", "src/older.py"], events_path=self.store)
         command = [sys.executable, "-B", str(SCRIPT_PATH), "--store", str(self.store), "--vault", str(self.case_root), "amend", "--event-id", written["event_id"], "--replace-file", r"src\old.py=src\new.py"]
-        completed = subprocess.run(command, cwd=self.case_root, text=True, capture_output=True, check=False)
+        completed = subprocess.run(command, cwd=self.case_root, text=True, capture_output=True, check=False, **hidden_process_options())
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
         self.assertEqual(json.loads(completed.stdout)["status"], "updated")
         self.assertEqual(MEMORY._read_events(self.store)[0]["files"], ["src/new.py", "src/older.py"])
@@ -359,6 +426,15 @@ class AIMemoryTests(unittest.TestCase):
         self.assertEqual(result, {"status": "no-candidates", "written": False, "candidates": 0})
         self.assertFalse(self.store.exists())
         self.assertFalse((self.case_root / "Preferences").exists())
+
+    def test_project_candidates_cannot_write_global_preferences(self):
+        candidate = {"kind": "preference", "area": "ui", "statement": "Use red buttons in this game.", "evidence": "The user specified a project design.", "basis": "explicit_user_request", "confidence": "high", "source": "ending"}
+        with self.assertRaisesRegex(ValueError, "global preferences only"):
+            MEMORY.record_memory_candidates([candidate], project="GameOne", events_path=self.store, preferences_root=self.case_root)
+        self.assertFalse(self.store.exists())
+        self.assertFalse((self.case_root / "Preferences").exists())
+        rows = MEMORY._captured_memory_rows([{"project": "GameOne", "memory_candidates": [candidate]}])
+        self.assertEqual(rows, [])
 
     def test_memory_candidates_write_one_event_and_owner_pages(self):
         ui_page = self.case_root / "Preferences" / "UI Style Preferences.md"

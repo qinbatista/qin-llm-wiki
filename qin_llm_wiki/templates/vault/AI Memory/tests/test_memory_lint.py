@@ -11,7 +11,7 @@ LINT_SPECIFICATION = importlib.util.spec_from_file_location("memory_lint", MEMOR
 LINT = importlib.util.module_from_spec(LINT_SPECIFICATION)
 LINT_SPECIFICATION.loader.exec_module(LINT)
 GENERATED_VAULT_ROOT = MEMORY_ROOT.parent
-TEST_CACHE_ROOT = Path(os.environ.get("QIN_LLM_WIKI_TEST_CACHE", GENERATED_VAULT_ROOT / "Cache" / "tests" / "memory-lint-runtime"))
+TEST_CACHE_ROOT = Path(os.environ.get("QIN_LLM_WIKI_TEST_CACHE", GENERATED_VAULT_ROOT / "Cache" / "tmp-memory-lint-runtime")).expanduser().resolve()
 
 
 class MemoryLintTests(unittest.TestCase):
@@ -33,7 +33,7 @@ class MemoryLintTests(unittest.TestCase):
 
     def _create_generic_vault(self):
         self.case_root.mkdir(parents=True)
-        self._write_fixture_file("AGENTS.md", "# Generic AI Contract\n\nThis disposable fixture keeps one event in `AI Memory/events.jsonl`, uses `AI Memory/ai_memory.py`, reads at most five events, and emits a Memory gate before project work. Reusable Lessons and Book References are current owners; `auto_classify.py` refreshes bounded candidates and `remove-invalid` rejects valid records.\n\n- [[Start Here]]\n")
+        self._write_fixture_file("AGENTS.md", "# Generic AI Contract\n\nThis disposable fixture keeps one event in `AI Memory/events.jsonl`, uses `AI Memory/ai_memory.py`, uses `AI Memory/ai_memory.py recall` for the exact project, and keeps the user-selected model. Ending only saves memory; --all-projects is audit-only. Reusable Lessons and Book References are current owners; `auto_classify.py` refreshes bounded candidates and `remove-invalid` rejects valid records.\n\n- [[Start Here]]\n")
         self._write_fixture_file("CLAUDE.md", "# Claude Entry\n\nAlways read `AGENTS.md`, use `AI Memory/ai_memory.py`, and emit the Memory gate with Reusable Lessons. Do not create duplicate chronology owners.\n\n- [[Start Here]]\n")
         self._write_fixture_file("instruction.md", "# AI Entry\n\n`AGENTS.md` controls this fixture. The Memory gate reads Reusable Lessons, while chronology remains in `AI Memory/events.jsonl`.\n\n- [[Start Here]]\n")
         self._write_fixture_file("Start Here.md", "# Generic Memory Fixture\n\nThis root makes every generic owner reachable without copying a real vault.\n\n- [[Projects/index|Projects]]\n- [[Knowledge/index|Knowledge]]\n- [[Preferences/index|Preferences]]\n- [[Skills/index|Skills]]\n- [[Recent Work]]\n- [[Issues]]\n- [[Memory Dashboard]]\n")
@@ -55,9 +55,9 @@ class MemoryLintTests(unittest.TestCase):
         self._write_fixture_file("Preferences/index.md", "# Preferences\n\nStable generic working preferences have one current owner.\n\n- [[Preferences/AI Captured Preferences|AI Captured Preferences]]\n- [[Start Here]]\n")
         self._write_fixture_file("Preferences/AI Captured Preferences.md", "# AI Captured Preferences\n\nOnly bounded, verified preference candidates may update this generic owner.\n\n- [[Preferences/index|Preferences]]\n")
         self._write_fixture_file("Skills/index.md", "# Skills\n\nReusable capability contracts are indexed here without task chronology.\n\n- [[Start Here]]\n")
-        runtime_files = ("ai_memory.py", "auto_classify.py", "memory_lint.py", "tests/test_ai_memory.py", "tests/test_auto_classify.py", "tests/test_memory_lint.py")
-        for runtime_file in runtime_files:
-            self._write_fixture_file(f"AI Memory/{runtime_file}", f"RUNTIME_FIXTURE = {runtime_file!r}\n")
+        for runtime_file in LINT.REQUIRED_RUNTIME_FILES:
+            if runtime_file.endswith(".py"):
+                self._write_fixture_file(runtime_file, f"RUNTIME_FIXTURE = {runtime_file!r}\n")
         self._write_fixture_file("AI Memory/events.jsonl", "")
 
     def _valid_event(self, event_id="20260801T100000Z-abcdef123456"):
@@ -73,6 +73,15 @@ class MemoryLintTests(unittest.TestCase):
         self.assertEqual(audit["status"], "pass", audit["errors"])
         self.assertEqual(audit["ai_memory"]["events"], 0)
         self.assertGreater(audit["reachable_pages"], 10)
+
+    def test_imported_fix_outcome_does_not_invent_an_issue_lifecycle(self):
+        event = {**self._valid_event(), "event_type": "bug-fix"}
+        self._write_events([event])
+        self.assertEqual(LINT.inspect_event_store(self.case_root / "AI Memory" / "events.jsonl")[1], [])
+        event["record_kind"] = "issue"
+        self._write_events([event])
+        errors = LINT.inspect_event_store(self.case_root / "AI Memory" / "events.jsonl")[1]
+        self.assertTrue(any("issue record requires a stable issue_id" in error for error in errors))
 
     def test_malformed_cache_path_is_an_integrity_error(self):
         malformed_path = self.case_root / "Cache" / "tests" / "memory-only|Cache" / "evidence.json"

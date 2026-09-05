@@ -528,6 +528,8 @@ def _memory_candidate_key(candidate):
 def _captured_memory_rows(events):
     selected = {}
     for event in events:
+        if str(event.get("project", "")).casefold() != "global preferences":
+            continue
         seen_at = event.get("last_seen") or event.get("recorded_at") or ""
         for candidate in event.get("memory_candidates", []):
             key = _memory_candidate_key(candidate)
@@ -590,6 +592,8 @@ def record_memory_candidates(candidates, project="Global Preferences", module="e
     normalized = _normalize_memory_candidates(candidates)
     if not normalized:
         return {"status": "no-candidates", "written": False, "candidates": 0}
+    if str(project).strip().casefold() != "global preferences":
+        raise ValueError("capture-memory writes global preferences only; save project decisions in their project owner")
     if verification_status not in VERIFICATION_STATUSES:
         raise ValueError(f"verification-status must be one of {', '.join(VERIFICATION_STATUSES)}")
     owner_root = Path(preferences_root).expanduser().resolve()
@@ -715,9 +719,11 @@ def _compact_event(event):
     return {"event_id": event.get("event_id", ""), "last_seen": event.get("last_seen", ""), "project": event.get("project", ""), "modules": modules, "event_type": event.get("event_type", ""), "summary": event.get("summary", ""), "result": event.get("result", ""), "verification_status": event.get("verification_status", ""), "issue_id": event.get("issue_id", ""), "issue_status": event.get("issue_status", ""), "attempt_count": event.get("attempt_count", 1), "files": event.get("files", []), "memory_candidates": event.get("memory_candidates", []), "scope_relation": event.get("scope_relation", "project_result_provenance"), "provenance_relation": event.get("provenance_relation", "unscoped_query")}
 
 
-def search_events(project="", module="", query="", issue_status="", limit=5, compact=False, events_path=EVENTS_PATH, task_name="", session_id="", session_key="", task_scope_key="", task_group="", task_group_key=""):
+def search_events(project="", module="", query="", issue_status="", limit=5, compact=False, events_path=EVENTS_PATH, task_name="", session_id="", session_key="", task_scope_key="", task_group="", task_group_key="", all_projects=False):
     terms = [term for term in re.findall(r"[\w.+-]+", query.lower()) if len(term) >= 2][:12]
     normalized_project = project.strip()
+    if not normalized_project and not all_projects:
+        raise ValueError("A project is required; use --all-projects only for an explicit memory audit")
     scope = _scope_context(normalized_project, module or "project-wide", task_name, session_id, session_key, task_scope_key, task_group, task_group_key)
     matches = []
     ordered_events = sorted(_read_events(events_path), key=lambda event: event.get("last_seen") or event.get("recorded_at") or "", reverse=True)
@@ -744,6 +750,83 @@ def search_events(project="", module="", query="", issue_status="", limit=5, com
         if len(matches) >= max(1, min(limit, 25)):
             break
     return {"status": "ok" if matches else "no-matches", "matches": matches}
+
+
+def recall_project(project, module="", query="", limit=5, vault_root=VAULT_ROOT, events_path=None):
+    """Read a bounded current-truth view without crossing project ownership."""
+    project = _single_line(project, "project", max_length=160)
+    if project in {".", ".."} or any(character in project for character in "/\\"):
+        raise ValueError("project must be one exact project name")
+    root = Path(vault_root).expanduser()
+    empty = {"project": project, "sections": [], "matches": []}
+    if not root.is_dir():
+        return {"status": "skipped", "reason": "memory-unavailable", **empty}
+    project_root = root / "Projects" / project
+    for path in (root / "Projects", project_root, project_root / "Knowledge.md", root / "AI Memory", root / "AI Memory" / "events.jsonl"):
+        if path.is_symlink():
+            raise ValueError("Project recall does not follow symlinked memory owners")
+        path.resolve().relative_to(root.resolve())
+    sections = []
+    knowledge = project_root / "Knowledge.md"
+    terms = set(re.findall(r"[\w+-]+", (module + " " + query).casefold()))
+    if knowledge.is_file():
+        chunks = re.split(r"(?m)(?=^## )", knowledge.read_text(encoding="utf-8"))
+        ranked = []
+        for index, chunk in enumerate(chunks):
+            heading = chunk.splitlines()[0] if chunk.strip() else ""
+            score = sum(term in heading.casefold() for term in terms) * 4 + sum(term in chunk.casefold() for term in terms)
+            if score or not terms:
+                ranked.append((score, -index, chunk))
+        for _, _, chunk in sorted(ranked, reverse=True)[:2]:
+            sections.append({"file": f"Projects/{project}/Knowledge.md", "text": chunk.strip()[:2400]})
+    store = Path(events_path) if events_path is not None else root / "AI Memory" / "events.jsonl"
+    found = search_events(project, module, query, limit=min(5, max(1, limit)), compact=True, events_path=store)
+    if not sections and not found["matches"]:
+        return {"status": "skipped", "reason": "no-related-memory", **empty}
+    return {"status": "ok", "project": project, "sections": sections, "matches": found["matches"]}
+
+
+def migrate_coverage(events_path=EVENTS_PATH):
+    """Normalize known legacy coverage rows without dropping observations or IDs."""
+    def operation(events):
+        grouped = {}
+        retained = []
+        for event in events:
+            if event.get("coverage_schema") != 1 or event.get("event") != "scope-observed":
+                retained.append(event)
+                continue
+            record = event.get("record")
+            if not isinstance(record, dict) or not event.get("event_id") or record.get("scope_kind") not in {"project", "module", "method"}:
+                raise ValueError("Invalid legacy coverage observation")
+            grouped.setdefault(event["event_id"], []).append(record)
+        if not grouped:
+            return {"status": "no-op", "migrated_rows": 0}
+        existing_ids = {event.get("event_id") for event in retained}
+        for event_id, records in grouped.items():
+            if event_id in existing_ids:
+                raise ValueError("Legacy coverage ID conflicts with an existing outcome")
+            identities = {(record.get("project_name"), record.get("scope_kind"), record.get("module", ""), record.get("symbol", "")) for record in records}
+            if len(identities) != 1:
+                raise ValueError("Legacy coverage ID has conflicting project or module ownership")
+            project, kind, module, symbol = identities.pop()
+            project = _single_line(project, "project", max_length=160)
+            if project in {".", ".."} or any(character in project for character in "/\\"):
+                raise ValueError("Legacy coverage project must be one folder-safe name")
+            if any(not record.get("first_seen") or not record.get("last_seen") for record in records):
+                raise ValueError("Legacy coverage requires recorded timestamps")
+            module = _single_line(module or "project-wide", "module", max_length=160)
+            summary = f"Observed {kind} scope: {symbol or module}"
+            timestamps = [_normalize_recorded_at(record.get("first_seen", "")) for record in records]
+            last_seen = [_normalize_recorded_at(record.get("last_seen", "")) for record in records]
+            event = {"schema_version": SCHEMA_VERSION, "event_id": event_id, "recorded_at": min(timestamps), "last_seen": max(last_seen), "project": project, "record_kind": "event", "event_type": "documentation", "summary": summary, "reason": "Preserve a legacy scope observation in the canonical event schema", "result": "Scope metadata retained; no behavior verification was recorded", "verification_status": "not-run", "module_changes": [{"module": module, "summary": summary}], "files": _normalize_files([file for record in records for file in record.get("files", [])]), "source": "legacy-coverage-migration", "observation_count": sum(int(record.get("observation_count", 1)) for record in records)}
+            _validate_event_semantics(event)
+            event["fingerprint"] = _fingerprint(event)
+            retained.append(event)
+        retained.sort(key=lambda event: event.get("last_seen") or event.get("recorded_at") or "")
+        _write_events(retained, events_path)
+        return {"status": "migrated", "migrated_rows": sum(len(rows) for rows in grouped.values()), "retained_observations": len(grouped)}
+
+    return _with_store_lock(events_path, operation)
 
 
 def remove_invalid_event(event_id, duplicate_of="", events_path=EVENTS_PATH):
@@ -895,8 +978,10 @@ def main():
     redact_parser = subparsers.add_parser("redact-private")
     redact_parser.add_argument("--event-id", required=True)
     subparsers.add_parser("migrate-provenance")
+    subparsers.add_parser("migrate-coverage")
     search_parser = subparsers.add_parser("search")
     search_parser.add_argument("--project", default="")
+    search_parser.add_argument("--all-projects", action="store_true", help="Explicit cross-project memory audit only")
     search_parser.add_argument("--module", default="")
     search_parser.add_argument("--query", default="")
     search_parser.add_argument("--issue-status", choices=ISSUE_STATUSES, default="")
@@ -905,6 +990,11 @@ def main():
     search_parser.add_argument("--task-name", default=os.environ.get("LLM_WIKI_TASK_NAME", ""))
     search_parser.add_argument("--task-group", default=os.environ.get("LLM_WIKI_TASK_GROUP", ""))
     search_parser.add_argument("--session-id", default=os.environ.get("LLM_WIKI_SESSION_ID", ""))
+    recall_parser = subparsers.add_parser("recall")
+    recall_parser.add_argument("--project", required=True)
+    recall_parser.add_argument("--module", default="")
+    recall_parser.add_argument("--query", default="")
+    recall_parser.add_argument("--limit", type=int, default=5)
     subparsers.add_parser("render")
     subparsers.add_parser("status")
     arguments = parser.parse_args()
@@ -924,8 +1014,12 @@ def main():
         output = redact_private_event(arguments.event_id, arguments.store)
     elif arguments.command == "migrate-provenance":
         output = migrate_provenance(arguments.store)
+    elif arguments.command == "migrate-coverage":
+        output = migrate_coverage(arguments.store)
     elif arguments.command == "search":
-        output = search_events(arguments.project, arguments.module, arguments.query, arguments.issue_status, arguments.limit, arguments.compact, arguments.store, arguments.task_name, arguments.session_id, task_group=arguments.task_group)
+        output = search_events(arguments.project, arguments.module, arguments.query, arguments.issue_status, arguments.limit, arguments.compact, arguments.store, arguments.task_name, arguments.session_id, task_group=arguments.task_group, all_projects=arguments.all_projects)
+    elif arguments.command == "recall":
+        output = recall_project(arguments.project, arguments.module, arguments.query, arguments.limit, arguments.vault, arguments.store if arguments.store != EVENTS_PATH else None)
     elif arguments.command == "render":
         vault_path = arguments.vault.expanduser().resolve()
         output = render_views(arguments.store, vault_path / "Recent Work.md", vault_path / "Memory Dashboard.md", vault_path / "Issues.md")

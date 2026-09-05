@@ -8,24 +8,26 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .hidden_process import hidden_process_options
+
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
 TEMPLATE_ROOT = PACKAGE_ROOT / "templates" / "vault"
-MANAGED_FILES = ("AGENTS.md", "CLAUDE.md", "instruction.md", "AI Memory/ai_memory.py", "AI Memory/auto_classify.py", "AI Memory/memory_lint.py", "AI Memory/tests/test_ai_memory.py", "AI Memory/tests/test_auto_classify.py", "AI Memory/tests/test_memory_lint.py")
+MANAGED_FILES = ("AGENTS.md", "CLAUDE.md", "instruction.md", "AI Memory/ai_memory.py", "AI Memory/auto_classify.py", "AI Memory/memory_lint.py", "AI Memory/hidden_process.py", "AI Memory/tests/test_ai_memory.py", "AI Memory/tests/test_auto_classify.py", "AI Memory/tests/test_memory_lint.py", "AI Memory/tests/test_hidden_process.py")
 SEED_FILES = ("Start Here.md", "Projects/index.md", "Knowledge/index.md", "Knowledge/Project Learning.md", "Knowledge/Privacy and Safety.md", "Knowledge/Reusable Lessons/index.md", "Knowledge/Reusable Lessons/Candidates.md", "Knowledge/Reusable Lessons/Memory and Process.md", "Knowledge/Reusable Lessons/Code Architecture.md", "Knowledge/Reusable Lessons/Game Architecture.md", "Knowledge/Reusable Lessons/UI and Interaction.md", "Knowledge/Reusable Lessons/Technology Decisions.md", "Knowledge/Reusable Lessons/Verification.md", "Knowledge/Book References/index.md", "Knowledge/Book References/Programming and Software Engineering.md", "Knowledge/Book References/Unity and Game Development.md", "Knowledge/Book References/Computer Graphics and Shaders.md", "Preferences/index.md", "Preferences/AI Captured Preferences.md", "Skills/index.md")
 REQUIRED_ROOT_ENTRIES = ("AGENTS.md", "CLAUDE.md", "instruction.md", "Start Here.md", "Recent Work.md", "Issues.md", "Memory Dashboard.md", "AI Memory", "Projects", "Knowledge", "Preferences", "Skills")
-REQUIRED_RUNTIME_FILES = ("AI Memory/ai_memory.py", "AI Memory/auto_classify.py", "AI Memory/memory_lint.py", "AI Memory/tests/test_ai_memory.py", "AI Memory/tests/test_auto_classify.py", "AI Memory/tests/test_memory_lint.py", "AI Memory/events.jsonl")
+REQUIRED_RUNTIME_FILES = ("AI Memory/ai_memory.py", "AI Memory/auto_classify.py", "AI Memory/memory_lint.py", "AI Memory/hidden_process.py", "AI Memory/tests/test_ai_memory.py", "AI Memory/tests/test_auto_classify.py", "AI Memory/tests/test_memory_lint.py", "AI Memory/tests/test_hidden_process.py", "AI Memory/events.jsonl")
 REQUIRED_KNOWLEDGE_FILES = ("Knowledge/Reusable Lessons/index.md", "Knowledge/Reusable Lessons/Candidates.md", "Knowledge/Book References/index.md")
 FORBIDDEN_ENTRIES = ("_System", "raw", "Journal", "Archive", "History")
 SKIPPED_SCAN_PARTS = {".git", ".venv", "__pycache__", ".pytest_cache", "Cache", "build", "dist"}
 TEXT_SUFFIXES = {".md", ".py", ".toml", ".txt", ".json", ".jsonl", ".yaml", ".yml", ".ini", ".cfg"}
-VERIFY_CACHE_RELATIVE = Path("Cache") / "tests" / "llm-wiki-architecture"
+VERIFY_CACHE_RELATIVE = Path("Cache") / "tmp-llm-wiki-architecture"
 MUTATION_DIRECTORIES = ("AI Memory", "AI Memory/tests", "Projects", "Knowledge", "Preferences", "Skills")
 GENERATED_FILES = ("Recent Work.md", "Memory Dashboard.md", "Issues.md")
 SEED_REQUIRED_FRAGMENTS = {
     "Knowledge/index.md": ("- [[Knowledge/Reusable Lessons/index|Reusable Lessons]]", "- [[Knowledge/Book References/index|Book References]]"),
-    "Knowledge/Project Learning.md": ("Use one stable issue ID. Lifecycle status is `ACTIVE`, `MONITORING`, `RESOLVED`, or `ARCHIVED`; repeated attempts update the same row and increment `attempt_count`. Archive only when current architecture proves that the old owner, path, contract, or consumer is unreachable.", "Project-result session, task, and group fields are provenance rather than recall barriers. Search matching results across sessions. Run `AI Memory/auto_classify.py sync` after a verified outcome so uncertain patterns stay in the candidate queue and only high-confidence evidence becomes a reusable lesson."),
-    "Knowledge/Privacy and Safety.md": ("- Run production memory writes only for real outcomes. Put probes, fixtures, and failure simulations in an explicit disposable store and vault under the active project's `Cache/tests/` tree.", "- Treat malformed path components, bytecode, system metadata, empty canvases, placeholder events, and unreachable pages as integrity failures rather than hidden clutter."),
+    "Knowledge/Project Learning.md": ("Current lifecycle: recall only the exact project; skip absent memory; verify in the original task; Ending only summarizes and writes durable facts with the user-selected model and effort.",),
+    "Knowledge/Privacy and Safety.md": ("- Run production memory writes only for real outcomes. Put probes, fixtures, and failure simulations in an explicit disposable store and vault under the active project's `Cache/tmp-*/` tree.", "- Treat malformed path components, bytecode, system metadata, empty canvases, placeholder events, and unreachable pages as integrity failures rather than hidden clutter."),
     "Knowledge/Reusable Lessons/index.md": ("- [[Knowledge/Reusable Lessons/Candidates|Candidate Queue]]",),
     "Preferences/index.md": ("- [[Preferences/AI Captured Preferences|AI Captured Preferences]]",),
 }
@@ -112,7 +114,7 @@ def _mutation_boundary_errors(vault_path):
 
 
 def _run_json_command(arguments, cwd=None, environment=None):
-    completed = subprocess.run(arguments, cwd=cwd, env=environment, text=True, capture_output=True, check=False)
+    completed = subprocess.run(arguments, cwd=cwd, env=environment, text=True, capture_output=True, check=False, **hidden_process_options())
     payload = None
     if completed.stdout.strip():
         try:
@@ -208,7 +210,7 @@ def _prepare_disposable_directory(vault_path, name):
     cache_root.mkdir(parents=True, exist_ok=True)
     target_path = cache_root / name
     if target_path.parent.resolve() != cache_root or target_path.is_symlink():
-        raise ValueError("Disposable verification path escaped the vault Cache/tests boundary")
+        raise ValueError("Disposable verification path escaped the vault Cache/tmp-* boundary")
     if target_path.exists():
         shutil.rmtree(target_path)
     target_path.mkdir(parents=True)
@@ -220,7 +222,7 @@ def _runtime_unit_tests(vault_path):
     environment = os.environ.copy()
     environment["QIN_LLM_WIKI_TEST_CACHE"] = str(test_cache)
     command = [sys.executable, "-B", "-m", "unittest", "discover", "-s", str(vault_path / "AI Memory" / "tests"), "-p", "test_*.py", "-v"]
-    completed = subprocess.run(command, cwd=vault_path, env=environment, text=True, capture_output=True, check=False)
+    completed = subprocess.run(command, cwd=vault_path, env=environment, text=True, capture_output=True, check=False, **hidden_process_options())
     shutil.rmtree(test_cache)
     return {"status": "pass" if completed.returncode == 0 else "fail", "exit_code": completed.returncode, "stdout": completed.stdout.strip(), "stderr": completed.stderr.strip()}
 

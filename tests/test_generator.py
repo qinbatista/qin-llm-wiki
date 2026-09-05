@@ -7,10 +7,11 @@ import unittest
 from pathlib import Path
 
 from qin_llm_wiki.cli import MANAGED_FILES, REQUIRED_ROOT_ENTRIES, REQUIRED_RUNTIME_FILES, _write_architecture, architecture_signature, compare_architecture, privacy_check, verify_vault
+from qin_llm_wiki.hidden_process import hidden_process_options
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-TEST_CACHE_ROOT = PROJECT_ROOT / "Cache" / "tests" / "llm-wiki-architecture"
+TEST_CACHE_ROOT = PROJECT_ROOT / "Cache" / "tmp-llm-wiki-architecture"
 
 
 class WikiGeneratorTests(unittest.TestCase):
@@ -74,7 +75,7 @@ class WikiGeneratorTests(unittest.TestCase):
         check_statuses = {check["check_id"]: check["status"] for check in audit["check_runs"]}
         self.assertEqual(audit["status"], "pass", audit["errors"])
         self.assertEqual(check_statuses, {"architecture-structure": "pass", "vault-integrity": "pass", "runtime-unit-tests": "pass", "record-search-render-replay": "pass"})
-        self.assertFalse((self.vault_path / "Cache" / "tests" / "llm-wiki-architecture" / "runtime-replay").exists())
+        self.assertFalse((self.vault_path / "Cache" / "tmp-llm-wiki-architecture" / "runtime-replay").exists())
 
     def test_runtime_records_and_updates_one_issue(self):
         _write_architecture(self.vault_path, "Example Wiki", False)
@@ -160,7 +161,7 @@ class WikiGeneratorTests(unittest.TestCase):
         repaired = _write_architecture(self.vault_path, "Example Wiki", True)
         self.assertEqual(blocked["status"], "drift")
         self.assertEqual(repaired["status"], "written")
-        self.assertIn("Example Wiki AI contract", managed_path.read_text(encoding="utf-8"))
+        self.assertIn("Example Wiki memory contract", managed_path.read_text(encoding="utf-8"))
 
     def test_update_rejects_escaping_managed_target_before_any_write(self):
         _write_architecture(self.vault_path, "Example Wiki", False)
@@ -266,14 +267,16 @@ class WikiGeneratorTests(unittest.TestCase):
         _write_architecture(self.vault_path, "Example Wiki", False)
         test_directory = self.vault_path / "AI Memory" / "tests"
         environment = os.environ.copy()
-        environment["QIN_LLM_WIKI_TEST_CACHE"] = str(self.vault_path / "Cache" / "tests" / "direct-runtime")
-        completed = subprocess.run([sys.executable, "-B", "-m", "unittest", "discover", "-s", str(test_directory), "-p", "test_*.py", "-v"], cwd=self.vault_path, env=environment, text=True, capture_output=True, check=False)
+        environment["QIN_LLM_WIKI_TEST_CACHE"] = str(Path("Cache") / "tmp-direct-runtime")
+        completed = subprocess.run([sys.executable, "-B", "-m", "unittest", "discover", "-s", str(test_directory), "-p", "test_*.py", "-v"], cwd=self.vault_path, env=environment, text=True, capture_output=True, check=False, **hidden_process_options())
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
 
     def test_required_runtime_catalog_includes_classifier_and_lint_tests(self):
         self.assertIn("AI Memory/auto_classify.py", MANAGED_FILES)
         self.assertIn("AI Memory/tests/test_auto_classify.py", REQUIRED_RUNTIME_FILES)
         self.assertIn("AI Memory/tests/test_memory_lint.py", REQUIRED_RUNTIME_FILES)
+        self.assertIn("AI Memory/hidden_process.py", MANAGED_FILES)
+        self.assertIn("AI Memory/tests/test_hidden_process.py", REQUIRED_RUNTIME_FILES)
 
 
 if __name__ == "__main__":

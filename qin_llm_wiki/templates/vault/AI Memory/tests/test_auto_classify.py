@@ -13,7 +13,7 @@ MEMORY_SPECIFICATION = importlib.util.spec_from_file_location("ai_memory_for_cla
 MEMORY = importlib.util.module_from_spec(MEMORY_SPECIFICATION)
 MEMORY_SPECIFICATION.loader.exec_module(MEMORY)
 VAULT_ROOT = MEMORY_ROOT.parent
-TEST_CACHE_ROOT = Path(os.environ.get("QIN_LLM_WIKI_TEST_CACHE", VAULT_ROOT / "Cache" / "tests" / "auto-classify-runtime"))
+TEST_CACHE_ROOT = Path(os.environ.get("QIN_LLM_WIKI_TEST_CACHE", VAULT_ROOT / "Cache" / "tmp-auto-classify-runtime")).expanduser().resolve()
 
 
 class AutoClassifyTests(unittest.TestCase):
@@ -41,14 +41,13 @@ class AutoClassifyTests(unittest.TestCase):
         for relative_path in CLASSIFIER.TAXONOMY_PATHS.values():
             self.assertTrue((self.case_root / relative_path).is_file())
 
-    def test_two_verified_projects_auto_promote_one_reusable_lesson(self):
+    def test_repeated_projects_do_not_implicitly_create_global_rules(self):
         self._record_architecture_event("ProjectOne", "2026-08-01T10:00:00Z")
         self._record_architecture_event("ProjectTwo", "2026-08-02T10:00:00Z")
         output = CLASSIFIER.sync_catalog(self.case_root, self.store, apply=True)
         category_text = (self.case_root / CLASSIFIER.TAXONOMY_PATHS["code-architecture"]).read_text(encoding="utf-8")
-        self.assertEqual(output["auto_promoted"], 1)
-        self.assertIn("AUTO-LESSON:RL-AUTO-", category_text)
-        self.assertIn("Support projects: 2", category_text)
+        self.assertEqual(output["auto_promoted"], 0)
+        self.assertNotIn("AUTO-LESSON:RL-AUTO-", category_text)
 
     def test_one_project_remains_candidate(self):
         self._record_architecture_event("ProjectOne", "2026-08-01T10:00:00Z")
@@ -84,20 +83,31 @@ class AutoClassifyTests(unittest.TestCase):
 
     def test_recall_returns_bounded_category_match(self):
         self._record_architecture_event("ProjectOne", "2026-08-01T10:00:00Z")
-        output = CLASSIFIER.recall(self.case_root, self.store, query="ownership boundary", limit=1)
+        output = CLASSIFIER.recall(self.case_root, self.store, query="ownership boundary", limit=1, project="ProjectOne")
         self.assertEqual(output["status"], "ok")
         self.assertEqual(len(output["matches"]), 1)
         self.assertEqual(output["matches"][0]["category"], "code-architecture")
 
     def test_stale_auto_promotions_are_removed_after_evidence_changes(self):
-        self._record_architecture_event("ProjectOne", "2026-08-01T10:00:00Z")
-        self._record_architecture_event("ProjectTwo", "2026-08-02T10:00:00Z")
-        CLASSIFIER.sync_catalog(self.case_root, self.store, apply=True)
+        MEMORY.record_event("Global Preferences", "ui.layout", "preference", "Prefer readable UI layout", "Explicit global user preference", "Use readable spacing and truthful button feedback", "passed", events_path=self.store)
+        promoted = CLASSIFIER.sync_catalog(self.case_root, self.store, apply=True)
+        self.assertEqual(promoted["auto_promoted"], 1)
         events = MEMORY._read_events(self.store)
-        MEMORY._write_events(events[:1], self.store)
+        events[0]["verification_status"] = "partial"
+        MEMORY._write_events(events, self.store)
         CLASSIFIER.sync_catalog(self.case_root, self.store, apply=True)
-        category_text = (self.case_root / CLASSIFIER.TAXONOMY_PATHS["code-architecture"]).read_text(encoding="utf-8")
+        category_text = (self.case_root / CLASSIFIER.TAXONOMY_PATHS["ui-interaction"]).read_text(encoding="utf-8")
         self.assertNotIn("AUTO-LESSON:RL-AUTO-", category_text)
+
+    def test_project_preference_is_not_global_and_recall_does_not_mix_projects(self):
+        for project in ("ProjectOne", "ProjectTwo"):
+            MEMORY.record_event(project, "ui.layout", "preference", "Prefer readable UI layout", "Local project design decision", "Use readable spacing and truthful button feedback", "passed", events_path=self.store)
+        result = CLASSIFIER.sync_catalog(self.case_root, self.store, apply=True)
+        self.assertEqual(result["auto_promoted"], 0)
+        self.assertEqual(CLASSIFIER.recall(self.case_root, self.store)["matches"], [])
+        matches = CLASSIFIER.recall(self.case_root, self.store, project="ProjectOne")["matches"]
+        self.assertTrue(matches)
+        self.assertTrue(all(row["source_projects"] == ["ProjectOne"] for row in matches))
 
 
 if __name__ == "__main__":

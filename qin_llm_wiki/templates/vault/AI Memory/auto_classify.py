@@ -28,8 +28,6 @@ TAXONOMY_KEYWORDS = {"memory-process": ("memory", "cache", "persist", "process",
 CLUSTER_GROUPS = {"memory-process": (("process-lifecycle", ("process", "cleanup", "lifecycle", "queue")), ("cache-persistence", ("cache", "persist", "restart", "recovery"))), "code-architecture": (("ownership-boundary", ("ownership", "boundary", "source of truth", "contract")), ("schema-module", ("schema", "module", "serialization", "migration"))), "game-architecture": (("rules-presentation", ("gameplay", "scene", "presentation", "physics")), ("input-control", ("input", "control", "button", "touch"))), "ui-interaction": (("layout-readability", ("layout", "clipping", "spacing", "responsive", "readable")), ("feedback-lifecycle", ("feedback", "button", "status", "progress"))), "technology-decisions": (("renderer-platform", ("shader", "renderer", "texture", "platform")), ("provider-api", ("provider", "api", "model", "json"))), "verification": (("runtime-artifact", ("runtime", "capture", "render", "artifact", "screenshot")), ("regression-gate", ("regression", "acceptance", "retest", "gate")))}
 SENSITIVE_PATTERNS = (re.compile(r"(?:password|api[_ -]?key|secret|token|cookie|credential)\s*[:=]", re.IGNORECASE), re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), re.compile(r"(?<![A-Za-z0-9])/(?:Users|home)/[^\s]+", re.IGNORECASE), re.compile(r"(?<![A-Za-z0-9])[A-Z]:\\Users\\[^\s]+", re.IGNORECASE), re.compile(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b"))
 PROJECTION_REDACTIONS = (r"(?i)_System/", r"(?i)raw/", r"(?i)Journal/", r"(?i)Archive/", r"(?i)History\.md", r"(?i)Activity Index\.md", r"(?i)Untitled(?: \d+)?\.canvas")
-PROMOTION_MIN_PROJECTS = 2
-PROMOTION_MIN_CONFIDENCE = 0.78
 PLACEHOLDER_VALUES = {"tmp", "temp", "test", "dummy", "placeholder", "todo", "tbd", "n/a", "na", "none", "xxx"}
 
 
@@ -110,7 +108,7 @@ def _is_placeholder_event(event):
 
 
 def _explicit_preference(event):
-    return event.get("event_type") == "preference" or bool(event.get("memory_candidates"))
+    return str(event.get("project", "")).casefold() == "global preferences" and (event.get("event_type") == "preference" or bool(event.get("memory_candidates")))
 
 
 def _classify_event(event):
@@ -180,11 +178,11 @@ def _group_confidence(group):
 
 
 def _group_is_auto_promoted(group):
-    projects = _group_projects(group)
     all_passed = all(item["event"].get("verification_status") == "passed" for item in group)
-    explicit_preference = any(item["classification"]["explicit_preference"] for item in group)
+    explicit_preference = all(item["classification"]["explicit_preference"] for item in group)
     confidence = _group_confidence(group)
-    return bool((len(projects) >= PROMOTION_MIN_PROJECTS and all_passed and confidence >= PROMOTION_MIN_CONFIDENCE) or (explicit_preference and all_passed and confidence >= 0.85))
+    # Repeated project outcomes are review candidates, not permission to create a global rule.
+    return bool(explicit_preference and all_passed and confidence >= 0.85)
 
 
 def _promotion_groups(groups):
@@ -220,11 +218,12 @@ def _group_sources(vault_root, group):
 
 
 def _group_event_ids(group):
-    return ", ".join(f"`{item['event'].get('event_id', '')}`" for item in sorted(group, key=lambda item: item["event"].get("recorded_at", "")))
+    latest = sorted(group, key=lambda item: item["event"].get("recorded_at", ""), reverse=True)[:5]
+    return ", ".join(f"`{item['event'].get('event_id', '')}`" for item in latest) + (f"; {len(group)} total in event store" if len(group) > 5 else "")
 
 
 def _candidate_markdown(vault_root, groups, promoted_groups, blocked, unclassified, invalid_placeholders, classified_at):
-    lines = ["# Auto-Classified Lesson Queue", "", "Generated from verified events. This machine-managed evidence index never replaces the event store or curated current rules.", "", f"- Classified at: {classified_at}", f"- Candidate groups: {len(groups)}", f"- Privacy-blocked events: {blocked}", f"- Invalid placeholder events: {invalid_placeholders}", f"- Unclassified or low-signal events: {unclassified}", "", "## Promotion policy", "", "- `AUTO-PROMOTE` requires passed verification, high confidence, and support from at least two distinct projects; an explicit verified preference may qualify by itself.", "- `CANDIDATE` remains review evidence and does not change a shared rule.", "- Sensitive or placeholder events are never copied into this queue.", ""]
+    lines = ["# Auto-Classified Lesson Queue", "", "Generated from verified events. This machine-managed evidence index never replaces the event store or curated current rules.", "", f"- Classified at: {classified_at}", f"- Candidate groups: {len(groups)}", f"- Privacy-blocked events: {blocked}", f"- Invalid placeholder events: {invalid_placeholders}", f"- Unclassified or low-signal events: {unclassified}", "", "## Promotion policy", "", "- `AUTO-PROMOTE` requires an explicit Global Preferences outcome, passed verification, and high confidence. Repeated project outcomes remain candidates until the selected model writes a genuinely reusable rule.", "- `CANDIDATE` remains review evidence and does not change a shared rule.", "- Sensitive or placeholder events are never copied into this queue.", ""]
     for group_key, group in sorted(groups.items()):
         category, cluster = group_key.split(":", 1)
         lines.extend([f"### {_lesson_id(group_key)} — {_group_title(group)}", "", f"- Category: {TAXONOMY_TITLES[category]}", f"- Cluster: {cluster}", "- Decision: CANDIDATE", f"- Confidence: {_group_confidence(group)}", f"- Support projects: {len(_group_projects(group))}", f"- Source projects: {_group_sources(vault_root, group)}", f"- Source events: {_group_event_ids(group)}", ""])
@@ -244,8 +243,9 @@ def _lesson_markdown(vault_root, group_key, group, classified_at):
     latest_event = _latest_item(group)["event"]
     scope = "user-preference" if any(item["classification"]["explicit_preference"] for item in group) else "cross-project"
     evidence = "; ".join(f"{item['event'].get('project', 'Unknown')}: {_projection_text(item['event'].get('result') or item['event'].get('summary'), 180)} [{item['event'].get('verification_status', 'unknown')}]" for item in group[:4])
-    rule = _projection_text(latest_event.get("result") or latest_event.get("summary") or "Preserve the verified source boundary.", 300)
-    return "\n".join([f"### {_lesson_id(group_key)} — {_group_title(group)}", "- Status: ACTIVE", f"- Scope: {scope}", f"- Category: {TAXONOMY_TITLES[category]}", f"- Cluster: {cluster}", f"- Confidence: {_group_confidence(group)}", f"- Support projects: {len(_group_projects(group))}", f"- Reusable rule: Preserve the verified source outcome: {rule}", f"- Applies when: A new task matches the {cluster} pattern in this category.", "- Avoid when: Current source, current user intent, or fresh runtime evidence conflicts with this lesson.", f"- Evidence: {evidence}", f"- Source projects: {_group_sources(vault_root, group)}", f"- Source events: {_group_event_ids(group)}", f"- Last classified: {classified_at}"])
+    candidate_rules = [candidate.get("statement", "") for candidate in latest_event.get("memory_candidates", [])]
+    rule = _projection_text("; ".join(candidate_rules) or latest_event.get("result") or latest_event.get("summary"), 300)
+    return "\n".join([f"### {_lesson_id(group_key)} — {_group_title(group)}", "- Status: ACTIVE", f"- Scope: {scope}", f"- Category: {TAXONOMY_TITLES[category]}", f"- Cluster: {cluster}", f"- Confidence: {_group_confidence(group)}", f"- Support projects: {len(_group_projects(group))}", f"- Reusable rule: {rule}", f"- Applies when: A new task matches the {cluster} pattern in this category.", "- Avoid when: Current source, current user intent, or fresh runtime evidence conflicts with this lesson.", f"- Evidence: {evidence}", f"- Source projects: {_group_sources(vault_root, group)}", f"- Source events: {_group_event_ids(group)}", f"- Last classified: {classified_at}"])
 
 
 def _upsert_auto_block(path, category, lesson_id, lesson):
@@ -301,12 +301,17 @@ def sync_catalog(vault_root=VAULT_ROOT, events_path=EVENTS_PATH, apply=True, foc
         return classify_current_store()
 
 
-def recall(vault_root=VAULT_ROOT, events_path=EVENTS_PATH, query="", category="", limit=5):
-    groups, _, _, _ = _candidate_groups(_read_events(events_path))
+def recall(vault_root=VAULT_ROOT, events_path=EVENTS_PATH, query="", category="", limit=5, project=""):
+    events = [event for event in _read_events(events_path) if str(event.get("project", "")).casefold() in {project.strip().casefold(), "global preferences"}]
+    groups, _, _, _ = _candidate_groups(events)
     promoted_groups = _promotion_groups(groups)
     terms = [term for term in re.findall(r"[\w.+-]+", query.lower()) if len(term) >= 2][:12]
     matches = []
     for group_key, group in {**groups, **promoted_groups}.items():
+        if group_key not in promoted_groups:
+            group = [item for item in group if project and str(item["event"].get("project", "")).casefold() == project.strip().casefold()]
+            if not group:
+                continue
         parts = group_key.split(":", 2)
         group_category, cluster = parts[:2]
         if category and group_category != category:
@@ -331,10 +336,11 @@ def main():
     recall_parser.add_argument("--vault", type=Path, default=VAULT_ROOT)
     recall_parser.add_argument("--events", type=Path, default=EVENTS_PATH)
     recall_parser.add_argument("--query", default="")
+    recall_parser.add_argument("--project", default="", help="Exact project for candidates; omitted returns only global preferences")
     recall_parser.add_argument("--category", choices=TAXONOMY_KEYS, default="")
     recall_parser.add_argument("--limit", type=int, default=5)
     arguments = parser.parse_args()
-    output = sync_catalog(arguments.vault, arguments.events, apply=not arguments.dry_run, focus_event_id=arguments.focus_event_id) if arguments.command == "sync" else recall(arguments.vault, arguments.events, arguments.query, arguments.category, arguments.limit)
+    output = sync_catalog(arguments.vault, arguments.events, apply=not arguments.dry_run, focus_event_id=arguments.focus_event_id) if arguments.command == "sync" else recall(arguments.vault, arguments.events, arguments.query, arguments.category, arguments.limit, arguments.project)
     print(json.dumps(output, ensure_ascii=False, separators=(",", ":")))
 
 
