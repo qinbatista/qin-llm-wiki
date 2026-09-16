@@ -12,7 +12,7 @@ python3 -B -m qin_llm_wiki update --vault "path/to/MyWiki"
 python3 -B -m qin_llm_wiki verify --vault "path/to/MyWiki"
 ```
 
-Open the folder in Obsidian. Agents enter through `AGENTS.md` and read only memory relevant to the exact project and task. Missing memory is a normal skip.
+Open the folder in Obsidian. Agents enter through `AGENTS.md` (or agent-specific pointers `CLAUDE.md`, `GEMINI.md`) and read only memory relevant to the exact project and task. Missing memory is a normal skip.
 
 ```text
 python3 -B "path/to/MyWiki/AI Memory/ai_memory.py" recall --project GameOne --module combat.damage --query "critical rounding"

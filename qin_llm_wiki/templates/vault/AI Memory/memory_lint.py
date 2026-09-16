@@ -9,13 +9,13 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 REQUIRED_PROJECT_FILES = ("index.md", "Knowledge.md")
 REQUIRED_EVENT_FIELDS = ("schema_version", "event_id", "recorded_at", "last_seen", "project", "record_kind", "event_type", "summary", "reason", "result", "verification_status", "module_changes", "files")
-REQUIRED_ROOT_PATHS = ("Start Here.md", "AGENTS.md", "CLAUDE.md", "instruction.md", "Recent Work.md", "Memory Dashboard.md", "Issues.md", "Projects", "Preferences", "Knowledge", "Skills", "AI Memory")
+REQUIRED_ROOT_PATHS = ("Start Here.md", "AGENTS.md", "CLAUDE.md", "GEMINI.md", "instruction.md", "Recent Work.md", "Memory Dashboard.md", "Issues.md", "Projects", "Preferences", "Knowledge", "Skills", "AI Memory")
 REQUIRED_RUNTIME_FILES = ("AI Memory/ai_memory.py", "AI Memory/auto_classify.py", "AI Memory/memory_lint.py", "AI Memory/hidden_process.py", "AI Memory/tests/test_ai_memory.py", "AI Memory/tests/test_auto_classify.py", "AI Memory/tests/test_memory_lint.py", "AI Memory/tests/test_hidden_process.py", "AI Memory/events.jsonl")
 REQUIRED_REUSABLE_LESSON_FILES = ("Knowledge/Reusable Lessons/index.md", "Knowledge/Reusable Lessons/Candidates.md", "Knowledge/Reusable Lessons/Memory and Process.md", "Knowledge/Reusable Lessons/Code Architecture.md", "Knowledge/Reusable Lessons/Game Architecture.md", "Knowledge/Reusable Lessons/UI and Interaction.md", "Knowledge/Reusable Lessons/Technology Decisions.md", "Knowledge/Reusable Lessons/Verification.md")
 REQUIRED_BOOK_REFERENCE_FILES = ("Knowledge/Book References/index.md", "Knowledge/Book References/Unity and Game Development.md", "Knowledge/Book References/Computer Graphics and Shaders.md", "Knowledge/Book References/Programming and Software Engineering.md")
 REQUIRED_OWNER_LINKS = (("Knowledge/index.md", "Knowledge/Reusable Lessons/index"), ("Knowledge/index.md", "Knowledge/Book References/index"), ("Knowledge/Reusable Lessons/index.md", "Knowledge/Reusable Lessons/Candidates"), ("Preferences/index.md", "Preferences/AI Captured Preferences"))
 MANAGED_ROOTS = ("Projects", "Preferences", "Knowledge", "Skills", "AI Memory")
-ROOT_ENTRY_FILES = ("Start Here.md", "AGENTS.md", "CLAUDE.md", "instruction.md")
+ROOT_ENTRY_FILES = ("Start Here.md", "AGENTS.md", "CLAUDE.md", "GEMINI.md", "instruction.md")
 ALLOW_EMPTY_FILES = {"AI Memory/.lock", "AI Memory/events.jsonl"}
 TEXT_SUFFIXES = {".md", ".py", ".json", ".jsonl", ".canvas", ".txt", ".yaml", ".yml"}
 FORBIDDEN_PATHS = ("_System", "raw", "Journal", "Archive", "History", "LLM Wiki Home.md", "Knowledge/Activity Index.md", "Knowledge/instruction.md", "Skills/Activity Index.md", "Skills/instruction.md", "Projects/instruction.md")
@@ -417,7 +417,7 @@ def inspect_vault(vault_path):
         for legacy_name in ("History.md", "Activity Index.md", "instruction.md"):
             if (project_path / legacy_name).exists():
                 errors.append(f"{project_name}: legacy file remains: {legacy_name}")
-    protocol_fragments = {"AGENTS.md": ("AI Memory/events.jsonl", "AI Memory/ai_memory.py recall", "user-selected model", "Ending only", "--all-projects"), "CLAUDE.md": ("AGENTS",), "instruction.md": ("AGENTS",)}
+    protocol_fragments = {"AGENTS.md": ("AI Memory/events.jsonl", "AI Memory/ai_memory.py recall", "user-selected model", "Ending only", "--all-projects"), "CLAUDE.md": ("AGENTS",), "GEMINI.md": ("AGENTS",), "instruction.md": ("AGENTS",)}
     for relative_path, fragments in protocol_fragments.items():
         path = root / relative_path
         if not path.is_file():
