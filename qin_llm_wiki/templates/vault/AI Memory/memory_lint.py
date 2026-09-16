@@ -87,10 +87,9 @@ def resolve_wikilink_path(vault_path, source_path, target):
     if raw_path.is_absolute() or ".." in raw_path.parts:
         return None
     candidates = [vault_path / raw_path, source_path.parent / raw_path]
-    if not target_path.lower().endswith(".md"):
-        candidates.extend([vault_path / f"{target_path}.md", source_path.parent / f"{target_path}.md"])
-        if len(raw_path.parts) == 1:
-            candidates.extend(sorted(vault_path.rglob(f"{raw_path.name}.md")))
+    candidates.extend([vault_path / f"{target_path}.md", source_path.parent / f"{target_path}.md"])
+    if not target_path.lower().endswith(".md") and len(raw_path.parts) == 1:
+        candidates.extend(sorted(vault_path.rglob(f"{raw_path.name}.md")))
     seen = set()
     for candidate in candidates:
         try:
