@@ -42,6 +42,15 @@ MEMORY_CANDIDATE_BASES = ("explicit_user_request", "repeated_user_correction", "
 MEMORY_CANDIDATE_CONFIDENCE = ("high", "medium")
 MEMORY_BLOCK_START = "<!-- BEGIN CODEX CAPTURED PREFERENCES -->"
 MEMORY_BLOCK_END = "<!-- END CODEX CAPTURED PREFERENCES -->"
+RECALL_TECHNICAL_TERMS = (
+    ("动画", "animation", "animations", "tween"), ("精灵", "sprite", "sprites"), ("图片", "图像", "image", "images"),
+    ("缓存", "cache", "caching"), ("加载", "loading", "load"), ("界面", "ui", "interface"), ("排版", "布局", "layout"),
+    ("报告", "report"), ("检索", "召回", "recall", "retrieval"), ("记忆", "memory"), ("数据库", "database"),
+    ("验证", "verification", "validation"), ("测试", "test", "tests"), ("着色器", "shader"), ("粒子", "particle"),
+    ("碰撞", "collision"), ("材质", "material"), ("同步", "sync"), ("部署", "deploy", "deployment"),
+    ("提交", "commit"), ("推送", "push"), ("资源", "asset"), ("角色", "人物", "character"),
+)
+RECALL_STOP_WORDS = frozenset("a an and are as at be by can do for from how i in is it me my of on or please project the this to update was what when where which with wide".split())
 MEMORY_SENSITIVE_PATTERNS = (
     re.compile(r"(?<![A-Za-z0-9_-])(?:sk|rk|pk)-[A-Za-z0-9_-]{12,}"),
     re.compile(r"(?:api[_ -]?key|secret|password|token|cookie|credential)\s*[:=]\s*[^\s,;]{8,}", re.IGNORECASE),
@@ -255,9 +264,30 @@ def _validate_event_semantics(event):
         raise ValueError("memory event contains private or secret-like content")
 
 
+def _unique_json_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("JSON object contains duplicate keys")
+        value[key] = item
+    return value
+
+
+def _normalize_working_line(value):
+    if not isinstance(value, str) or not value.strip().startswith("{"):
+        return value
+    try:
+        parsed = json.loads(value, object_pairs_hook=_unique_json_object)
+        json.dumps(parsed, allow_nan=False)
+    except ValueError:
+        return value
+    return parsed if isinstance(parsed, dict) else value
+
+
 def _semantic_event_payload(event):
     payload = {field_name: event.get(field_name) for field_name in SEMANTIC_EVENT_FIELDS}
     payload["project"] = str(payload.get("project") or "").strip().casefold()
+    payload["working_line"] = _normalize_working_line(payload.get("working_line"))
     return payload
 
 
@@ -719,6 +749,14 @@ def _compact_event(event):
     return {"event_id": event.get("event_id", ""), "last_seen": event.get("last_seen", ""), "project": event.get("project", ""), "modules": modules, "event_type": event.get("event_type", ""), "summary": event.get("summary", ""), "result": event.get("result", ""), "verification_status": event.get("verification_status", ""), "issue_id": event.get("issue_id", ""), "issue_status": event.get("issue_status", ""), "attempt_count": event.get("attempt_count", 1), "files": event.get("files", []), "memory_candidates": event.get("memory_candidates", []), "scope_relation": event.get("scope_relation", "project_result_provenance"), "provenance_relation": event.get("provenance_relation", "unscoped_query")}
 
 
+def _event_searchable_text(event):
+    module_changes = event.get("module_changes", [])
+    modules = [change.get("module", "") for change in module_changes]
+    module_summaries = [change.get("summary", "") for change in module_changes]
+    candidate_text = [value for candidate in event.get("memory_candidates", []) for value in (candidate.get("statement", ""), candidate.get("evidence", ""), candidate.get("area", ""), candidate.get("kind", ""))]
+    return " ".join([event.get("project", ""), event.get("summary", ""), event.get("reason", ""), event.get("result", ""), event.get("event_type", ""), event.get("bug_class", ""), event.get("issue_id", ""), *modules, *module_summaries, *event.get("files", []), *event.get("decisions", []), *event.get("risks", []), *candidate_text])
+
+
 def search_events(project="", module="", query="", issue_status="", limit=5, compact=False, events_path=EVENTS_PATH, task_name="", session_id="", session_key="", task_scope_key="", task_group="", task_group_key="", all_projects=False):
     terms = [term for term in re.findall(r"[\w.+-]+", query.lower()) if len(term) >= 2][:12]
     normalized_project = project.strip()
@@ -736,9 +774,7 @@ def search_events(project="", module="", query="", issue_status="", limit=5, com
             continue
         if issue_status and event.get("issue_status", "").upper() != issue_status.strip().upper():
             continue
-        module_summaries = [change.get("summary", "") for change in module_changes]
-        candidate_text = [value for candidate in event.get("memory_candidates", []) for value in (candidate.get("statement", ""), candidate.get("evidence", ""), candidate.get("area", ""), candidate.get("kind", ""))]
-        searchable = " ".join([event.get("project", ""), event.get("summary", ""), event.get("reason", ""), event.get("result", ""), event.get("event_type", ""), event.get("bug_class", ""), event.get("issue_id", ""), *modules, *module_summaries, *event.get("files", []), *event.get("decisions", []), *event.get("risks", []), *candidate_text]).lower()
+        searchable = _event_searchable_text(event).lower()
         if terms and not all(term in searchable for term in terms):
             continue
         matched_event = dict(event)
@@ -752,13 +788,75 @@ def search_events(project="", module="", query="", issue_status="", limit=5, com
     return {"status": "ok" if matches else "no-matches", "matches": matches}
 
 
+def _recall_term_matches(term, text):
+    if term.isascii():
+        return re.search(r"(?<![a-z0-9])" + re.escape(term) + r"(?![a-z0-9])", text) is not None
+    return term in text
+
+
+def _recall_terms(value):
+    """Bound lexical expansion; bilingual terms are hints, not semantic search."""
+    normalized = value.casefold()[:600]
+    for phrase in ("请帮我", "帮我", "给我", "如何", "怎么", "一下", "相关", "修改", "查找", "查看", "需要", "这个", "是否", "我的"):
+        normalized = normalized.replace(phrase, " ")
+    tokens = re.findall(r"[a-z0-9][a-z0-9_+#-]*|[\u3400-\u9fff]+", normalized)
+    terms = {term: 6 for term in tokens[:24] if len(term) >= 2 and term not in RECALL_STOP_WORDS}
+    for aliases in RECALL_TECHNICAL_TERMS:
+        if any(_recall_term_matches(alias, normalized) for alias in aliases):
+            for alias in aliases:
+                terms[alias] = max(terms.get(alias, 0), 5)
+    remaining = normalized
+    for aliases in RECALL_TECHNICAL_TERMS:
+        for alias in aliases:
+            if not alias.isascii():
+                remaining = remaining.replace(alias, " ")
+    for sequence in re.findall(r"[\u3400-\u9fff]{3,}", remaining):
+        for index in range(min(len(sequence) - 1, 48)):
+            term = sequence[index:index + 2]
+            terms.setdefault(term, 1)
+    return terms
+
+
+def _recall_score(text, terms):
+    normalized = text.casefold() + " " + re.sub(r"([a-z])([A-Z])", r"\1 \2", text).casefold()
+    matched = sorted(term for term in terms if _recall_term_matches(term, normalized))
+    ungrouped = set(matched)
+    score = 0
+    for aliases in RECALL_TECHNICAL_TERMS:
+        group = ungrouped.intersection(aliases)
+        if group:
+            score += max(terms[term] for term in group)
+            ungrouped.difference_update(group)
+    return score + sum(terms[term] for term in ungrouped), matched
+
+
+def _recall_excerpt(chunk, terms):
+    content = chunk.strip()
+    if len(content) <= 2400:
+        return content
+    heading = content.splitlines()[0][:240]
+    paragraphs = list(re.finditer(r"\S(?:.*?\S)?(?=\n\s*\n|\Z)", content, re.DOTALL))
+    best = max(paragraphs, key=lambda paragraph: _recall_score(paragraph.group(), terms)[0])
+    normalized = best.group().casefold()
+    strongest = sorted((term for term in terms if _recall_term_matches(term, normalized)), key=lambda term: (-terms[term], -len(term), term))
+    position = best.start() + (normalized.find(strongest[0]) if strongest else 0)
+    start = max(len(heading), position - 240)
+    excerpt = content[start:start + 2400 - len(heading) - 6]
+    return heading + "\n\n… " + excerpt
+
+
 def recall_project(project, module="", query="", limit=5, vault_root=VAULT_ROOT, events_path=None):
     """Read a bounded current-truth view without crossing project ownership."""
     project = _single_line(project, "project", max_length=160)
     if project in {".", ".."} or any(character in project for character in "/\\"):
         raise ValueError("project must be one exact project name")
     root = Path(vault_root).expanduser()
-    empty = {"project": project, "sections": [], "matches": []}
+    query_terms = _recall_terms(query)
+    module_terms = _recall_terms(module.replace(".", " ").replace("-", " "))
+    unfiltered = not (query.strip() or module.strip())
+    event_limit = min(5, max(1, limit))
+    evidence = {"scope": "current-retrieval-only", "method": "ranked-lexical-bilingual", "sources": [], "query_terms": sorted(query_terms), "module_terms": sorted(module_terms), "matched_terms": [], "unmatched_terms": sorted(query_terms), "limits": {"sections": 2, "events": event_limit}, "returned": {"sections": 0, "events": 0}}
+    empty = {"project": project, "sections": [], "matches": [], "recall_evidence": evidence}
     if not root.is_dir():
         return {"status": "skipped", "reason": "memory-unavailable", **empty}
     project_root = root / "Projects" / project
@@ -768,22 +866,160 @@ def recall_project(project, module="", query="", limit=5, vault_root=VAULT_ROOT,
         path.resolve().relative_to(root.resolve())
     sections = []
     knowledge = project_root / "Knowledge.md"
-    terms = set(re.findall(r"[\w+-]+", (module + " " + query).casefold()))
     if knowledge.is_file():
+        evidence["sources"].append(f"Projects/{project}/Knowledge.md")
         chunks = re.split(r"(?m)(?=^## )", knowledge.read_text(encoding="utf-8"))
         ranked = []
         for index, chunk in enumerate(chunks):
             heading = chunk.splitlines()[0] if chunk.strip() else ""
-            score = sum(term in heading.casefold() for term in terms) * 4 + sum(term in chunk.casefold() for term in terms)
-            if score or not terms:
-                ranked.append((score, -index, chunk))
-        for _, _, chunk in sorted(ranked, reverse=True)[:2]:
-            sections.append({"file": f"Projects/{project}/Knowledge.md", "text": chunk.strip()[:2400]})
+            query_score, query_matches = _recall_score(chunk, query_terms)
+            heading_score, heading_matches = _recall_score(heading, query_terms)
+            module_score, module_matches = _recall_score(chunk, module_terms)
+            score = query_score * 4 + heading_score * 4 + module_score
+            if score or unfiltered:
+                ranked.append((bool(query_score), score, -index, chunk))
+        for has_query_match, score, position, chunk in sorted(ranked, reverse=True)[:2]:
+            excerpt = _recall_excerpt(chunk, query_terms or module_terms)
+            excerpt_score, matched_terms = _recall_score(excerpt, {**module_terms, **query_terms})
+            sections.append({"file": f"Projects/{project}/Knowledge.md", "text": excerpt, "matched_terms": matched_terms, "relevance_score": score, "truncated": len(chunk.strip()) > 2400})
     store = Path(events_path) if events_path is not None else root / "AI Memory" / "events.jsonl"
-    found = search_events(project, module, query, limit=min(5, max(1, limit)), compact=True, events_path=store)
-    if not sections and not found["matches"]:
+    if store.is_symlink():
+        raise ValueError("Project recall does not follow symlinked memory owners")
+    events = [event for event in _read_events(store) if event.get("project", "").casefold() == project.casefold()]
+    superseded = {event.get("supersedes") for event in events if event.get("supersedes") and event.get("supersedes") != event.get("event_id")}
+    if store.is_file():
+        evidence["sources"].append("event-store" if events_path is not None else "AI Memory/events.jsonl")
+    ranked_events = []
+    for event in events:
+        if event.get("event_id") in superseded:
+            continue
+        searchable = _event_searchable_text(event)
+        query_score, query_matches = _recall_score(searchable, query_terms)
+        module_score, module_matches = _recall_score(" ".join(change.get("module", "") for change in event.get("module_changes", [])), module_terms)
+        score = query_score * 4 + module_score
+        if score or unfiltered:
+            ranked_events.append((bool(query_score), score, event.get("last_seen") or event.get("recorded_at") or "", event.get("event_id", ""), event, sorted(set(query_matches + module_matches))))
+    matches = []
+    for has_query_match, score, timestamp, event_id, event, matched_terms in sorted(ranked_events, key=lambda item: item[:4], reverse=True)[:event_limit]:
+        matches.append({**_compact_event(event), "matched_terms": matched_terms, "relevance_score": score})
+    evidence["matched_terms"] = sorted({term for item in sections + matches for term in item["matched_terms"]})
+    evidence["unmatched_terms"] = sorted(set(query_terms) - set(evidence["matched_terms"]))
+    evidence["returned"] = {"sections": len(sections), "events": len(matches)}
+    if not sections and not matches:
         return {"status": "skipped", "reason": "no-related-memory", **empty}
-    return {"status": "ok", "project": project, "sections": sections, "matches": found["matches"]}
+    return {"status": "ok", "project": project, "sections": sections, "matches": matches, "recall_evidence": evidence}
+
+
+def normalize_working_lines(events_path=EVENTS_PATH, apply=False, expected_sha256=""):
+    """Normalize proven object representations and merge only identical history."""
+    path = Path(events_path)
+    expected = str(expected_sha256 or "").strip().lower()
+    if apply and not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise ValueError("--apply requires a valid --expected-sha256")
+    if expected and not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise ValueError("expected-sha256 must be a SHA256 digest")
+    if path.is_symlink():
+        raise ValueError("event store must not be a symlink")
+
+    def operation():
+        if path.is_symlink():
+            raise ValueError("event store must not be a symlink")
+        raw = path.read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        if expected and digest != expected:
+            raise ValueError("event store changed: expected-sha256 does not match")
+        events = [json.loads(line, object_pairs_hook=_unique_json_object) for line in raw.decode("utf-8").splitlines() if line.strip()]
+        identifiers = set()
+        timestamps = {}
+        for event in events:
+            if not isinstance(event, dict) or event.get("schema_version") != SCHEMA_VERSION or event.get("record_kind") not in {"event", "issue", "memory"}:
+                raise ValueError("normalization requires canonical event objects")
+            event_id = event.get("event_id")
+            if not isinstance(event_id, str) or not EVENT_ID_PATTERN.fullmatch(event_id) or event_id in identifiers:
+                raise ValueError("event store requires valid unique event IDs")
+            identifiers.add(event_id)
+            project = event.get("project")
+            if not isinstance(project, str) or not project.strip() or project in {".", ".."} or any(character in project for character in "/\\"):
+                raise ValueError("event store contains an invalid project owner")
+            if event.get("event_type") not in EVENT_TYPES or event.get("verification_status") not in VERIFICATION_STATUSES:
+                raise ValueError("event store contains an invalid event type or verification status")
+            if any(not isinstance(event.get(field), str) or not event[field].strip() for field in ("summary", "reason", "result")):
+                raise ValueError("event store requires event summary, reason, and result")
+            changes = event.get("module_changes")
+            if not isinstance(changes, list) or any(not isinstance(change, dict) or not isinstance(change.get("module"), str) or not isinstance(change.get("summary"), str) for change in changes):
+                raise ValueError("event store contains invalid module changes")
+            supersedes = event.get("supersedes", "")
+            if not isinstance(supersedes, str):
+                raise ValueError("event store contains an invalid supersedes reference")
+            count = event.get("attempt_count", 1)
+            if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+                raise ValueError("event store contains an invalid attempt count")
+            event_times = {}
+            for field in ("recorded_at", "last_seen"):
+                value = event.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError("event store requires recorded timestamps")
+                _normalize_recorded_at(value)
+                event_times[field] = datetime.fromisoformat(value.replace("Z", "+00:00").replace("z", "+00:00"))
+            if event_times["last_seen"] < event_times["recorded_at"]:
+                raise ValueError("event last_seen precedes recorded_at")
+            timestamps[event_id] = event_times
+            json.dumps(event, allow_nan=False)
+        by_identifier = {event["event_id"]: event for event in events}
+        checked = set()
+        for event_id in identifiers:
+            visited = set()
+            cursor = event_id
+            while cursor in by_identifier and cursor not in checked:
+                if cursor in visited:
+                    raise ValueError("event store contains a supersedes cycle")
+                visited.add(cursor)
+                cursor = by_identifier[cursor].get("supersedes", "")
+            checked.update(visited)
+        referenced = {event.get("supersedes") for event in events if event.get("supersedes")}
+        opaque_references = [value for value in referenced if not EVENT_ID_PATTERN.fullmatch(value)]
+        referenced.update(event_id for event_id in identifiers if any(event_id in value for value in opaque_references))
+        metadata_fields = {"schema_version", "event_id", "recorded_at", "last_seen", "attempt_count", "fingerprint", "source", "project_root", "session_id", "session_key", "task_name", "task_group", "task_scope_key", "task_group_key", "task_scope_mode", "codex_session_key"}
+        normalized_count = 0
+        groups = defaultdict(list)
+        normalized_events = []
+        for event in events:
+            normalized = dict(event)
+            working_line = _normalize_working_line(event.get("working_line"))
+            if isinstance(event.get("working_line"), str) and isinstance(working_line, dict):
+                normalized["working_line"] = working_line
+                normalized["fingerprint"] = _fingerprint(normalized)
+                normalized_count += 1
+            normalized_events.append(normalized)
+            if isinstance(working_line, dict):
+                extra_fields = {field: value for field, value in normalized.items() if field not in SEMANTIC_EVENT_FIELDS and field not in metadata_fields}
+                group_key = json.dumps({"semantic": _semantic_event_payload(normalized), "extra": extra_fields}, sort_keys=True, ensure_ascii=False, allow_nan=False)
+                groups[group_key].append(normalized)
+        removed_to_retained = {}
+        for group in groups.values():
+            if len(group) < 2:
+                continue
+            protected = [event for event in group if event["event_id"] in referenced]
+            candidates = protected or group
+            retained = min(candidates, key=lambda event: (timestamps[event["event_id"]]["recorded_at"], event["event_id"]))
+            removed = [event for event in group if event is not retained and event["event_id"] not in referenced]
+            if not removed:
+                continue
+            merged = [retained, *removed]
+            retained["recorded_at"] = min(merged, key=lambda event: timestamps[event["event_id"]]["recorded_at"])["recorded_at"]
+            retained["last_seen"] = max(merged, key=lambda event: timestamps[event["event_id"]]["last_seen"])["last_seen"]
+            retained["attempt_count"] = max(event.get("attempt_count", 1) for event in merged)
+            retained["fingerprint"] = _fingerprint(retained)
+            for event in removed:
+                removed_to_retained[event["event_id"]] = retained["event_id"]
+        retained_events = [event for event in normalized_events if event["event_id"] not in removed_to_retained]
+        changed = bool(normalized_count or removed_to_retained)
+        if apply and changed:
+            _write_events(retained_events, path)
+        status = "applied" if apply and changed else "no-op" if apply else "dry-run"
+        return {"status": status, "sha256": digest, "normalized_count": normalized_count, "removed_count": len(removed_to_retained), "removed_to_retained": removed_to_retained, "events_before": len(events), "events_after": len(retained_events), "opaque_supersedes_count": len(opaque_references)}
+
+    return _with_path_lock(path.parent / ".lock", operation) if apply else operation()
 
 
 def migrate_coverage(events_path=EVENTS_PATH):
@@ -979,6 +1215,9 @@ def main():
     redact_parser.add_argument("--event-id", required=True)
     subparsers.add_parser("migrate-provenance")
     subparsers.add_parser("migrate-coverage")
+    normalize_parser = subparsers.add_parser("normalize-working-lines")
+    normalize_parser.add_argument("--apply", action="store_true")
+    normalize_parser.add_argument("--expected-sha256", default="")
     search_parser = subparsers.add_parser("search")
     search_parser.add_argument("--project", default="")
     search_parser.add_argument("--all-projects", action="store_true", help="Explicit cross-project memory audit only")
@@ -1016,6 +1255,8 @@ def main():
         output = migrate_provenance(arguments.store)
     elif arguments.command == "migrate-coverage":
         output = migrate_coverage(arguments.store)
+    elif arguments.command == "normalize-working-lines":
+        output = normalize_working_lines(arguments.store, arguments.apply, arguments.expected_sha256)
     elif arguments.command == "search":
         output = search_events(arguments.project, arguments.module, arguments.query, arguments.issue_status, arguments.limit, arguments.compact, arguments.store, arguments.task_name, arguments.session_id, task_group=arguments.task_group, all_projects=arguments.all_projects)
     elif arguments.command == "recall":

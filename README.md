@@ -18,7 +18,9 @@ Open the folder in Obsidian. Agents enter through `AGENTS.md` (or agent-specific
 python3 -B "path/to/MyWiki/AI Memory/ai_memory.py" recall --project GameOne --module combat.damage --query "critical rounding"
 ```
 
-`recall` returns up to two matching Knowledge sections and five compact events. It never substitutes another project, follows project-owner symlinks, or creates an absent vault. Session provenance does not hide another session's result for the same project. Advanced `search` requires `--project`; cross-project maintenance must explicitly use `--all-projects`.
+`recall` ranks up to two relevant Knowledge sections and five compact events within the exact project. It accepts module hints and common Chinese/English technical selectors, exposes matched sources, and keeps superseded events out of current recall. It never substitutes another project, follows project-owner symlinks, or creates an absent vault. Session provenance does not hide another session's result for the same project. Advanced `search` retains exact module and all-keyword matching; cross-project maintenance must explicitly use `--all-projects`.
+
+Read the returned source and explain its relevance in the active task. A lookup response establishes only that call's retrieval; coverage and routing records cannot establish historical memory usage. The generated `Knowledge/Memory Retrieval.md` explains project, people/role, technical, and shared-preference entry points.
 
 ## Memory workflow
 
@@ -52,3 +54,5 @@ python3 -B -m qin_llm_wiki privacy-check --path .
 ```
 
 Focused tests exercise project isolation, absent-memory skips, bounded recall, writer privacy, guarded repairs, and safe updates. `verify` checks structure and links, runs runtime tests, and replays record/search/render in disposable `Cache/tmp-*` data without touching production events. See [Architecture](docs/ARCHITECTURE.md) and [Privacy](docs/PRIVACY.md).
+
+For reviewed legacy stores, `ai_memory.py normalize-working-lines` previews JSON-object/string normalization and strictly equivalent duplicate removal. Applying that exact preview requires `--apply --expected-sha256 DIGEST`; referenced IDs and different business facts are preserved. For auxiliary JSONL files with complete objects joined without a newline, use the generator's `repair-jsonl --vault VAULT --path RELATIVE_JSONL --expected-sha256 DIGEST`. Back up the private vault before either migration. Neither command uploads private memory.

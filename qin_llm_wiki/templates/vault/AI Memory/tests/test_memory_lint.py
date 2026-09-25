@@ -97,6 +97,30 @@ class MemoryLintTests(unittest.TestCase):
         audit = LINT.inspect_vault(self.case_root)
         self.assertTrue(any("Ghost artifact remains" in error for error in audit["errors"]))
 
+    def test_generated_snapshot_and_supplementary_jsonl_are_checked(self):
+        self._write_fixture_file("Issues 2.md", "# Issues\n\nEarlier generated issue view.\n")
+        self._write_fixture_file("AI Memory/Model Routing/events.jsonl", '{"schema":1}{"schema":2}\n')
+        audit = LINT.inspect_vault(self.case_root)
+        self.assertTrue(any("Duplicate generated view remains: Issues 2.md" in error for error in audit["errors"]))
+        self.assertTrue(any("Invalid JSONL managed file AI Memory/Model Routing/events.jsonl:1" in error for error in audit["errors"]))
+
+    def test_escaped_table_alias_resolves_to_its_owner(self):
+        owner = self.case_root / "Start Here.md"
+        self.assertEqual(LINT.resolve_wikilink_path(self.case_root, owner, r"Knowledge/index\|Knowledge"), self.case_root / "Knowledge/index.md")
+
+    def test_legacy_working_line_serialization_does_not_hide_duplicate_events(self):
+        working_line = {"branch": "main", "version": 1}
+        first = {**self._valid_event(), "working_line": working_line}
+        second = {**first, "event_id": "20260801T100000Z-duplicate", "working_line": json.dumps(working_line)}
+        self._write_events([first, second])
+        self.assertTrue(any("Semantic duplicate AI events" in error for error in LINT.inspect_event_store(self.case_root / "AI Memory/events.jsonl")[1]))
+
+    def test_historical_sources_keep_link_checks_without_current_contract_checks(self):
+        self._write_fixture_file("Projects/Example/Legacy Codex Notes/source.md", "# Original source\n\nThe retired Journal/ layout is historical evidence.\n\n[[Missing reference]]\n")
+        audit = LINT.inspect_vault(self.case_root)
+        self.assertFalse(any("Stale structure reference" in error and "source.md" in error for error in audit["errors"]))
+        self.assertTrue(any("Broken or inaccessible wikilink" in error and "source.md" in error for error in audit["errors"]))
+
     def test_local_markdown_image_uri_is_an_integrity_error(self):
         local_image_uri = "file://" + str(Path("/", "Users", "example", "diagram.png"))
         local_link_uri = "file://" + str(Path("/", "Users", "example", "evidence.txt"))

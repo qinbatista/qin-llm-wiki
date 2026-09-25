@@ -1,5 +1,7 @@
 # Knowledge
 
+- [[Knowledge/Memory Retrieval|Memory Retrieval]]
+
 Current cross-project engineering rules, reusable lessons, privacy boundaries, and bounded external references are organized here.
 
 - [[Knowledge/Project Learning|Project Learning]]

@@ -1,4 +1,6 @@
 import importlib.util
+import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -6,7 +8,7 @@ import sys
 import unittest
 from pathlib import Path
 
-from qin_llm_wiki.cli import MANAGED_FILES, REQUIRED_ROOT_ENTRIES, REQUIRED_RUNTIME_FILES, _write_architecture, architecture_signature, compare_architecture, privacy_check, verify_vault
+from qin_llm_wiki.cli import MANAGED_FILES, REQUIRED_ROOT_ENTRIES, REQUIRED_RUNTIME_FILES, _write_architecture, architecture_signature, compare_architecture, privacy_check, repair_jsonl, verify_vault
 from qin_llm_wiki.hidden_process import hidden_process_options
 
 
@@ -97,6 +99,9 @@ class WikiGeneratorTests(unittest.TestCase):
 
     def test_update_preserves_user_content_events_and_classified_lessons(self):
         _write_architecture(self.vault_path, "Example Wiki", False)
+        home_path = self.vault_path / "Start Here.md"
+        localized_home = "# Example Wiki\n\nChoose a current owner.\n\n| Need | Entry |\n| --- | --- |\n| Recall | [[Knowledge/Memory Retrieval\\|检索说明]] |\n"
+        home_path.write_text(localized_home, encoding="utf-8")
         user_knowledge = self.vault_path / "Knowledge" / "User Notes.md"
         user_knowledge.write_text("# User Notes\n\nPrivate content remains local.\n", encoding="utf-8")
         category_path = self.vault_path / "Knowledge" / "Reusable Lessons" / "Code Architecture.md"
@@ -112,6 +117,7 @@ class WikiGeneratorTests(unittest.TestCase):
         self.assertEqual(user_knowledge.read_text(encoding="utf-8"), "# User Notes\n\nPrivate content remains local.\n")
         self.assertIn("A user-curated lesson remains local.", category_path.read_text(encoding="utf-8"))
         self.assertEqual(events_path.read_text(encoding="utf-8"), original_events)
+        self.assertEqual(home_path.read_text(encoding="utf-8"), localized_home)
 
     def test_update_from_v1_0_seed_owners_is_idempotent_and_deep_verifiable(self):
         _write_architecture(self.vault_path, "Example Wiki", False)
@@ -277,6 +283,115 @@ class WikiGeneratorTests(unittest.TestCase):
         self.assertIn("AI Memory/tests/test_memory_lint.py", REQUIRED_RUNTIME_FILES)
         self.assertIn("AI Memory/hidden_process.py", MANAGED_FILES)
         self.assertIn("AI Memory/tests/test_hidden_process.py", REQUIRED_RUNTIME_FILES)
+
+    def _auxiliary_store(self, content):
+        target = self.vault_path / "AI Memory" / "Routing" / "events.jsonl"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        return target, target.relative_to(self.vault_path).as_posix(), hashlib.sha256(content).hexdigest()
+
+    def test_repair_jsonl_cli_only_inserts_separators_and_preserves_exact_values(self):
+        first = b' {"schema":1,"schema":2,"number":1.2300e+20,"nested":{"text":"}{","list":[true,null]}}'
+        second = '{"name":"记忆","separator":"\u2028"}'.encode("utf-8")
+        third = b'{"complete":true}\r\n'
+        original = first + second + b"  " + third
+        target, relative, digest = self._auxiliary_store(original)
+        completed = subprocess.run([sys.executable, "-B", "-m", "qin_llm_wiki.cli", "repair-jsonl", "--vault", str(self.vault_path), "--path", relative, "--expected-sha256", digest], cwd=PROJECT_ROOT, text=True, capture_output=True, check=False, **hidden_process_options())
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        output = json.loads(completed.stdout)
+        expected = first + b"\n" + second + b"  \n" + third
+        self.assertEqual(target.read_bytes(), expected)
+        self.assertEqual(output["status"], "written")
+        self.assertEqual(output["records"], 3)
+        self.assertEqual(output["added_newlines"], 2)
+        self.assertEqual(output["before_sha256"], digest)
+        self.assertEqual(output["after_sha256"], hashlib.sha256(expected).hexdigest())
+        self.assertEqual([json.loads(line) for line in expected.split(b"\n") if line.strip()], [json.loads(first), json.loads(second), json.loads(third)])
+        self.assertFalse(list(target.parent.glob(".jsonl-repair-*")))
+        before_repeat = self._tree_snapshot(self.vault_path)
+        repeated = repair_jsonl(self.vault_path, relative, output["after_sha256"])
+        self.assertEqual(repeated["status"], "unchanged")
+        self.assertEqual(self._tree_snapshot(self.vault_path), before_repeat)
+
+    def test_repair_jsonl_valid_input_does_not_write_or_create_locks(self):
+        for content in (b"", b' \r\n{"valid":true}\r\n', b'{"valid":true}'):
+            with self.subTest(content=content):
+                target, relative, digest = self._auxiliary_store(content)
+                before = self._tree_snapshot(self.vault_path)
+                output = repair_jsonl(self.vault_path, relative, digest.upper())
+                self.assertEqual(output["status"], "unchanged", output)
+                self.assertEqual(self._tree_snapshot(self.vault_path), before)
+                self.assertEqual(target.read_bytes(), content)
+
+    def test_repair_jsonl_rejects_damaged_or_non_object_input_before_writes(self):
+        for content in (b'{}{}{"unfinished":', b"{}[]", b"{}true", b"{}garbage", b'{"value":NaN}{}', b'{"value":Infinity}', b'{"nested":\n{}}', b"{}\xff"):
+            with self.subTest(content=content):
+                target, relative, digest = self._auxiliary_store(content)
+                before = self._tree_snapshot(self.vault_path)
+                output = repair_jsonl(self.vault_path, relative, digest)
+                self.assertEqual(output["status"], "error")
+                self.assertEqual(self._tree_snapshot(self.vault_path), before)
+                self.assertEqual(target.read_bytes(), content)
+                self.assertNotIn("unfinished", output["message"])
+                self.assertNotIn("garbage", output["message"])
+
+    def test_repair_jsonl_rejects_hash_mismatch_escape_and_primary_store(self):
+        target, relative, digest = self._auxiliary_store(b"{}{}")
+        primary = self.vault_path / "AI Memory" / "events.jsonl"
+        primary.write_bytes(b"{}{}")
+        for path, expected in ((relative, "0" * 64), (relative, "invalid"), ("../outside.jsonl", digest), (str(target), digest), (r"C:\outside.jsonl", digest), ("AI Memory/events.jsonl", digest)):
+            with self.subTest(path=path):
+                before = self._tree_snapshot(self.vault_path)
+                output = repair_jsonl(self.vault_path, path, expected)
+                self.assertEqual(output["status"], "error", output)
+                self.assertEqual(self._tree_snapshot(self.vault_path), before)
+
+    def test_repair_jsonl_rejects_symlink_target_ancestor_and_locks(self):
+        self.external_root.mkdir(parents=True)
+        external_file = self.external_root / "events.jsonl"
+        external_file.write_bytes(b"{}{}")
+        digest = hashlib.sha256(external_file.read_bytes()).hexdigest()
+        for case in ("target", "ancestor", "owner-lock", "store-lock", "vault"):
+            with self.subTest(case=case):
+                vault = self.vault_path / case
+                directory = vault / "AI Memory" / "Routing"
+                directory.mkdir(parents=True)
+                relative = "AI Memory/Routing/events.jsonl"
+                target = vault / relative
+                if case == "target":
+                    self._make_symlink(target, external_file)
+                else:
+                    target.write_bytes(b"{}{}")
+                if case == "ancestor":
+                    shutil.rmtree(directory)
+                    self._make_symlink(directory, self.external_root)
+                elif case in {"owner-lock", "store-lock"}:
+                    lock_parent = vault / "AI Memory" if case == "owner-lock" else directory
+                    self._make_symlink(lock_parent / ".lock", external_file)
+                elif case == "vault":
+                    alias = self.vault_path / "vault-alias"
+                    self._make_symlink(alias, vault)
+                    vault = alias
+                before = self._tree_snapshot(self.vault_path)
+                external_before = self._tree_snapshot(self.external_root)
+                output = repair_jsonl(vault, relative, digest)
+                self.assertEqual(output["status"], "error", output)
+                self.assertEqual(self._tree_snapshot(self.vault_path), before)
+                self.assertEqual(self._tree_snapshot(self.external_root), external_before)
+
+    def test_repair_jsonl_respects_existing_memory_owner_lock(self):
+        target, relative, digest = self._auxiliary_store(b"{}{}")
+        runtime_path = PROJECT_ROOT / "qin_llm_wiki" / "templates" / "vault" / "AI Memory" / "ai_memory.py"
+        specification = importlib.util.spec_from_file_location("repair_lock_ai_memory", runtime_path)
+        runtime = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(runtime)
+        with (self.vault_path / "AI Memory" / ".lock").open("a", encoding="utf-8") as owner_lock:
+            runtime._lock(owner_lock)
+            completed = subprocess.run([sys.executable, "-B", "-m", "qin_llm_wiki.cli", "repair-jsonl", "--vault", str(self.vault_path), "--path", relative, "--expected-sha256", digest], cwd=PROJECT_ROOT, text=True, capture_output=True, check=False, timeout=15, **hidden_process_options())
+        self.assertEqual(completed.returncode, 1, completed.stdout + completed.stderr)
+        self.assertIn("lock is busy", json.loads(completed.stdout)["message"])
+        self.assertEqual(target.read_bytes(), b"{}{}")
+        self.assertFalse(list(target.parent.glob(".jsonl-repair-*")))
 
 
 if __name__ == "__main__":

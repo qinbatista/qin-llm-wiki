@@ -52,7 +52,7 @@ def _placeholder_token(value):
 
 
 def _split_wikilink(target):
-    target_value = target.split("|", 1)[0].strip()
+    target_value = target.replace(r"\|", "|").split("|", 1)[0].strip()
     path_part, separator, anchor = target_value.partition("#")
     return path_part.strip(), anchor.strip() if separator else ""
 
@@ -114,6 +114,10 @@ def current_markdown_paths(vault_path):
     return sorted(path for path in vault_path.rglob("*.md") if not any(part in {".git", ".obsidian", "Cache", "build", "dist"} for part in path.relative_to(vault_path).parts))
 
 
+def historical_source_copy(vault_path, path):
+    return "Legacy Codex Notes" in path.relative_to(vault_path).parts and path.name != "index.md"
+
+
 def managed_file_paths(vault_path):
     paths = {path for path in vault_path.iterdir() if path.is_file() and path.name != ".obsidian"}
     for root_name in MANAGED_ROOTS:
@@ -162,6 +166,8 @@ def inspect_path_hygiene(vault_path):
         if any(part in {".git", ".obsidian"} for part in relative_parts):
             continue
         relative_path = _relative(vault_path, path)
+        if path.parent == vault_path and re.fullmatch(r"(?:Recent Work|Issues|Memory Dashboard) \d+\.md", path.name):
+            errors.append(f"Duplicate generated view remains: {relative_path}; review unique edits before removing the copy")
         malformed_part = next((part for part in relative_parts if "|" in part), "")
         if malformed_part:
             errors.append(f"Malformed path component contains '|': {relative_path}")
@@ -216,6 +222,14 @@ def inspect_managed_file_access(vault_path):
             else:
                 if path.suffix.lower() == ".canvas" and payload in ({}, []):
                     errors.append(f"Empty canvas payload: {relative_path}")
+        elif path.suffix.lower() == ".jsonl" and relative_path != "AI Memory/events.jsonl":
+            for line_number, line in enumerate(text.splitlines(), 1):
+                if not line.strip():
+                    continue
+                try:
+                    json.loads(line)
+                except json.JSONDecodeError as error:
+                    errors.append(f"Invalid JSONL managed file {relative_path}:{line_number}: {error.msg}")
     return managed_files, errors
 
 
@@ -300,6 +314,26 @@ def _string_leaves(value):
         yield value
 
 
+def _unique_json_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("JSON object contains duplicate keys")
+        value[key] = item
+    return value
+
+
+def _normalize_working_line(value):
+    if not isinstance(value, str) or not value.strip().startswith("{"):
+        return value
+    try:
+        parsed = json.loads(value, object_pairs_hook=_unique_json_object)
+        json.dumps(parsed, allow_nan=False)
+    except (ValueError, RecursionError):
+        return value
+    return parsed if isinstance(parsed, dict) else value
+
+
 def inspect_event_store(events_path):
     errors = []
     events = []
@@ -365,6 +399,7 @@ def inspect_event_store(events_path):
         if any(pattern.search(value) for value in _string_leaves(semantic_payload) for pattern in SENSITIVE_PATTERNS):
             errors.append(f"AI event line {line_number}: private or secret-like content is forbidden")
         semantic_payload["project"] = str(semantic_payload.get("project") or "").strip().casefold()
+        semantic_payload["working_line"] = _normalize_working_line(semantic_payload.get("working_line"))
         semantic_payloads.append(json.dumps(semantic_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
         event_ids.append(str(event.get("event_id", "")).lower())
         if event.get("issue_id"):
@@ -428,7 +463,7 @@ def inspect_vault(vault_path):
                 errors.append(f"Missing protocol fragment in {relative_path}: {fragment}")
     for path in current_markdown_paths(root):
         relative_path = _relative(root, path)
-        if relative_path in {"Memory Dashboard.md", "Recent Work.md", "Issues.md"}:
+        if relative_path in {"Memory Dashboard.md", "Recent Work.md", "Issues.md"} or historical_source_copy(root, path):
             continue
         try:
             text = path.read_text(encoding="utf-8")

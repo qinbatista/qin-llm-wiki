@@ -1,4 +1,5 @@
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -6,7 +7,10 @@ import re
 import shutil
 import subprocess
 import sys
-from pathlib import Path
+import tempfile
+import time
+from contextlib import ExitStack, contextmanager
+from pathlib import Path, PureWindowsPath
 
 from .hidden_process import hidden_process_options
 
@@ -14,7 +18,7 @@ from .hidden_process import hidden_process_options
 PACKAGE_ROOT = Path(__file__).resolve().parent
 TEMPLATE_ROOT = PACKAGE_ROOT / "templates" / "vault"
 MANAGED_FILES = ("AGENTS.md", "CLAUDE.md", "GEMINI.md", "instruction.md", "AI Memory/ai_memory.py", "AI Memory/auto_classify.py", "AI Memory/memory_lint.py", "AI Memory/hidden_process.py", "AI Memory/tests/test_ai_memory.py", "AI Memory/tests/test_auto_classify.py", "AI Memory/tests/test_memory_lint.py", "AI Memory/tests/test_hidden_process.py")
-SEED_FILES = ("Start Here.md", "Projects/index.md", "Knowledge/index.md", "Knowledge/Project Learning.md", "Knowledge/Privacy and Safety.md", "Knowledge/Reusable Lessons/index.md", "Knowledge/Reusable Lessons/Candidates.md", "Knowledge/Reusable Lessons/Memory and Process.md", "Knowledge/Reusable Lessons/Code Architecture.md", "Knowledge/Reusable Lessons/Game Architecture.md", "Knowledge/Reusable Lessons/UI and Interaction.md", "Knowledge/Reusable Lessons/Technology Decisions.md", "Knowledge/Reusable Lessons/Verification.md", "Knowledge/Book References/index.md", "Knowledge/Book References/Programming and Software Engineering.md", "Knowledge/Book References/Unity and Game Development.md", "Knowledge/Book References/Computer Graphics and Shaders.md", "Preferences/index.md", "Preferences/AI Captured Preferences.md", "Skills/index.md")
+SEED_FILES = ("Start Here.md", "Projects/index.md", "Knowledge/index.md", "Knowledge/Project Learning.md", "Knowledge/Memory Retrieval.md", "Knowledge/Privacy and Safety.md", "Knowledge/Reusable Lessons/index.md", "Knowledge/Reusable Lessons/Candidates.md", "Knowledge/Reusable Lessons/Memory and Process.md", "Knowledge/Reusable Lessons/Code Architecture.md", "Knowledge/Reusable Lessons/Game Architecture.md", "Knowledge/Reusable Lessons/UI and Interaction.md", "Knowledge/Reusable Lessons/Technology Decisions.md", "Knowledge/Reusable Lessons/Verification.md", "Knowledge/Book References/index.md", "Knowledge/Book References/Programming and Software Engineering.md", "Knowledge/Book References/Unity and Game Development.md", "Knowledge/Book References/Computer Graphics and Shaders.md", "Preferences/index.md", "Preferences/AI Captured Preferences.md", "Skills/index.md")
 REQUIRED_ROOT_ENTRIES = ("AGENTS.md", "CLAUDE.md", "GEMINI.md", "instruction.md", "Start Here.md", "Recent Work.md", "Issues.md", "Memory Dashboard.md", "AI Memory", "Projects", "Knowledge", "Preferences", "Skills")
 REQUIRED_RUNTIME_FILES = ("AI Memory/ai_memory.py", "AI Memory/auto_classify.py", "AI Memory/memory_lint.py", "AI Memory/hidden_process.py", "AI Memory/tests/test_ai_memory.py", "AI Memory/tests/test_auto_classify.py", "AI Memory/tests/test_memory_lint.py", "AI Memory/tests/test_hidden_process.py", "AI Memory/events.jsonl")
 REQUIRED_KNOWLEDGE_FILES = ("Knowledge/Reusable Lessons/index.md", "Knowledge/Reusable Lessons/Candidates.md", "Knowledge/Book References/index.md")
@@ -25,7 +29,8 @@ VERIFY_CACHE_RELATIVE = Path("Cache") / "tmp-llm-wiki-architecture"
 MUTATION_DIRECTORIES = ("AI Memory", "AI Memory/tests", "Projects", "Knowledge", "Preferences", "Skills")
 GENERATED_FILES = ("Recent Work.md", "Memory Dashboard.md", "Issues.md")
 SEED_REQUIRED_FRAGMENTS = {
-    "Knowledge/index.md": ("- [[Knowledge/Reusable Lessons/index|Reusable Lessons]]", "- [[Knowledge/Book References/index|Book References]]"),
+    "Start Here.md": ("- [[Knowledge/Memory Retrieval|Memory Retrieval]]",),
+    "Knowledge/index.md": ("- [[Knowledge/Reusable Lessons/index|Reusable Lessons]]", "- [[Knowledge/Book References/index|Book References]]", "- [[Knowledge/Memory Retrieval|Memory Retrieval]]"),
     "Knowledge/Project Learning.md": ("Current lifecycle: recall only the exact project; skip absent memory; verify in the original task; Ending only summarizes and writes durable facts with the user-selected model and effort.",),
     "Knowledge/Privacy and Safety.md": ("- Run production memory writes only for real outcomes. Put probes, fixtures, and failure simulations in an explicit disposable store and vault under the active project's `Cache/tmp-*/` tree.", "- Treat malformed path components, bytecode, system metadata, empty canvases, placeholder events, and unreachable pages as integrity failures rather than hidden clutter."),
     "Knowledge/Reusable Lessons/index.md": ("- [[Knowledge/Reusable Lessons/Candidates|Candidate Queue]]",),
@@ -53,6 +58,152 @@ def _file_sha256(path):
     return _sha256_bytes(Path(path).read_bytes()) if Path(path).is_file() else ""
 
 
+def _jsonl_repair_target(vault_path, relative_path):
+    portable_path = str(relative_path).replace("\\", "/")
+    parts = portable_path.split("/")
+    if PureWindowsPath(portable_path).drive or any(part in {"", ".", ".."} or ":" in part for part in parts):
+        raise ValueError("Repair path must be a confined vault-relative path.")
+    if portable_path.casefold() == "ai memory/events.jsonl":
+        raise ValueError("The primary event store requires the guarded ai_memory repair APIs.")
+    target = vault_path.joinpath(*parts)
+    if target.suffix.lower() != ".jsonl":
+        raise ValueError("Repair target must be an existing JSONL file.")
+    paths = [vault_path, *(vault_path.joinpath(*parts[:index]) for index in range(1, len(parts) + 1))]
+    locks = list(dict.fromkeys((vault_path / "AI Memory" / ".lock", target.parent / ".lock")))
+    for path in (*paths, *(lock.parent for lock in locks), *locks):
+        if path.is_symlink():
+            raise ValueError("Repair target, ancestors, and locks must not be symlinks.")
+        try:
+            path.resolve().relative_to(vault_path.resolve())
+        except (OSError, RuntimeError, ValueError):
+            raise ValueError("Repair path escapes the vault boundary.") from None
+    if not vault_path.is_dir() or not target.is_file() or any(not lock.parent.is_dir() for lock in locks):
+        raise ValueError("Repair target and memory lock directories must already exist.")
+    if any(lock.exists() and not lock.is_file() for lock in locks):
+        raise ValueError("Memory locks must be regular files.")
+    primary_store = vault_path / "AI Memory" / "events.jsonl"
+    if primary_store.exists() and target.samefile(primary_store):
+        raise ValueError("The primary event store requires the guarded ai_memory repair APIs.")
+    return target, locks
+
+
+def _split_concatenated_jsonl(content):
+    def reject_constant(_value):
+        raise ValueError("Invalid JSON constant")
+
+    decoder = json.JSONDecoder(parse_constant=reject_constant)
+    lines = content.decode("utf-8").split("\n")
+    records = added_newlines = 0
+    for line_number, line in enumerate(lines, 1):
+        position = 0
+        insertions = []
+        line_records = 0
+        while position < len(line):
+            while position < len(line) and line[position] in " \t\r":
+                position += 1
+            if position == len(line):
+                break
+            start = position
+            try:
+                value, position = decoder.raw_decode(line, start)
+            except (ValueError, RecursionError):
+                raise ValueError(f"Invalid or incomplete JSON on line {line_number}; no repair applied.") from None
+            if not isinstance(value, dict):
+                raise ValueError(f"Non-object JSON on line {line_number}; no repair applied.")
+            if line_records:
+                insertions.append(start)
+            records += 1
+            line_records += 1
+        for start in reversed(insertions):
+            line = line[:start] + "\n" + line[start:]
+        lines[line_number - 1] = line
+        added_newlines += len(insertions)
+    return "\n".join(lines).encode("utf-8"), records, added_newlines
+
+
+@contextmanager
+def _jsonl_repair_lock(path):
+    # Match ai_memory's parent/.lock protocol on both supported OS families.
+    if os.name == "nt":
+        import msvcrt
+    elif os.name == "posix":
+        import fcntl
+    else:
+        raise ValueError("JSONL repair locking is unsupported on this host.")
+    flags = os.O_RDWR | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+    with os.fdopen(os.open(path, flags, 0o600), "a+b") as handle:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                if os.name == "nt":
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise ValueError("Memory lock is busy; no repair applied.") from None
+                time.sleep(0.05)
+            except OSError as error:
+                if os.name != "nt" or error.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise ValueError("Memory lock is busy; no repair applied.") from None
+                time.sleep(0.05)
+        yield
+
+
+def repair_jsonl(vault_path, relative_path, expected_sha256):
+    """Insert only missing object separators after validating the entire file."""
+    vault_path = Path(os.path.abspath(os.fspath(Path(vault_path).expanduser())))
+    pending_path = None
+    try:
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", expected_sha256):
+            raise ValueError("Expected SHA-256 must contain exactly 64 hexadecimal characters.")
+        target, locks = _jsonl_repair_target(vault_path, relative_path)
+        original = target.read_bytes()
+        before_sha256 = _sha256_bytes(original)
+        if before_sha256 != expected_sha256.lower():
+            raise ValueError("Expected SHA-256 does not match; no repair applied.")
+        repaired, records, added_newlines = _split_concatenated_jsonl(original)
+        result = {"status": "unchanged", "file": target.relative_to(vault_path).as_posix(), "records": records, "added_newlines": added_newlines, "before_sha256": before_sha256, "after_sha256": _sha256_bytes(repaired)}
+        if not added_newlines:
+            return result
+        with ExitStack() as stack:
+            for lock in locks:
+                _jsonl_repair_target(vault_path, relative_path)
+                stack.enter_context(_jsonl_repair_lock(lock))
+            _jsonl_repair_target(vault_path, relative_path)
+            if target.read_bytes() != original:
+                raise ValueError("JSONL changed while acquiring its locks; no repair applied.")
+            mode = target.stat().st_mode & 0o777
+            descriptor, temporary_name = tempfile.mkstemp(prefix=".jsonl-repair-", suffix=".pending", dir=target.parent)
+            pending_path = Path(temporary_name)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(repaired)
+                handle.flush()
+                os.fsync(handle.fileno())
+            pending_path.chmod(mode)
+            _jsonl_repair_target(vault_path, relative_path)
+            if target.read_bytes() != original:
+                raise ValueError("JSONL changed before replacement; no repair applied.")
+            pending_path.replace(target)
+            pending_path = None
+        result["status"] = "written"
+        return result
+    except (ValueError, OSError) as error:
+        message = str(error) if isinstance(error, ValueError) and not isinstance(error, UnicodeError) else f"JSONL repair failed ({type(error).__name__}); no content was emitted."
+        return {"status": "error", "message": message}
+    finally:
+        if pending_path is not None:
+            pending_path.unlink(missing_ok=True)
+
+
 def _managed_drift(vault_path, template_texts):
     drift = []
     for relative_path in MANAGED_FILES:
@@ -71,7 +222,12 @@ def _seed_fragment_updates(vault_path):
             continue
         current_bytes = target_path.read_bytes()
         current_text = current_bytes.decode("utf-8")
-        missing_fragments = [fragment for fragment in required_fragments if fragment not in current_text]
+        existing_targets = set(re.findall(r"\[\[([^\]|]+)(?:\|[^\]]*)?\]\]", current_text.replace(r"\|", "|")))
+        missing_fragments = []
+        for fragment in required_fragments:
+            navigation = re.fullmatch(r"- \[\[([^\]|]+)\|[^\]]+\]\]", fragment)
+            if fragment not in current_text and not (navigation and navigation.group(1) in existing_targets):
+                missing_fragments.append(fragment)
         if not missing_fragments:
             continue
         separator = b"" if current_bytes.endswith(b"\n\n") else b"\n" if current_bytes.endswith(b"\n") else b"\n\n"
@@ -334,6 +490,10 @@ def main():
     compare_parser.add_argument("--deep", action="store_true")
     privacy_parser = subparsers.add_parser("privacy-check")
     privacy_parser.add_argument("--path", type=Path, default=Path.cwd())
+    repair_parser = subparsers.add_parser("repair-jsonl", help="Insert missing newlines between complete objects in an auxiliary JSONL file.")
+    repair_parser.add_argument("--vault", type=Path, required=True)
+    repair_parser.add_argument("--path", required=True)
+    repair_parser.add_argument("--expected-sha256", required=True)
     arguments = parser.parse_args()
     if arguments.command in {"init", "update"}:
         output = _write_architecture(arguments.vault, arguments.name, arguments.force_managed)
@@ -341,10 +501,12 @@ def main():
         output = verify_vault(arguments.vault.expanduser().resolve(), run_runtime=not arguments.quick)
     elif arguments.command == "compare":
         output = compare_architecture(arguments.reference.expanduser().resolve(), arguments.candidate.expanduser().resolve(), run_runtime=arguments.deep)
+    elif arguments.command == "repair-jsonl":
+        output = repair_jsonl(arguments.vault, arguments.path, arguments.expected_sha256)
     else:
         output = privacy_check(arguments.path.expanduser().resolve())
     print(json.dumps(output, ensure_ascii=False, indent=2 if getattr(arguments, "json", False) else None))
-    raise SystemExit(0 if output["status"] in {"pass", "written"} else 1)
+    raise SystemExit(0 if output["status"] in {"pass", "written", "unchanged"} else 1)
 
 
 if __name__ == "__main__":

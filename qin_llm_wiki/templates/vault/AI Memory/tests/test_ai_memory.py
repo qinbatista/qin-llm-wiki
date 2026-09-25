@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 import json
 import os
 import shutil
@@ -42,6 +43,122 @@ class AIMemoryTests(unittest.TestCase):
         except (NotImplementedError, OSError) as error:
             self.skipTest(f"symlink creation is unavailable: {error}")
 
+    def _working_line_pair(self):
+        working_line = {"remote": "origin", "branch": "main", "commit": "abc123", "identity_scope": "project", "version": 1}
+        MEMORY.record_event("GameOne", "render.animation", "architecture", "Animation has one owner", "Avoid competing frame writers", "One owner controls the frame sequence", "passed", working_line=json.dumps(working_line), recorded_at="2026-08-01T10:00:00Z", events_path=self.store)
+        original = MEMORY._read_events(self.store)[0]
+        original.update({"event_id": "legacy-object", "working_line": working_line})
+        duplicate = {**original, "event_id": "legacy-string", "working_line": json.dumps(working_line, sort_keys=True), "recorded_at": "2026-08-02T10:00:00Z", "last_seen": "2026-08-03T10:00:00Z", "attempt_count": 4}
+        return original, duplicate
+
+    def test_normalize_working_lines_dry_run_apply_and_idempotent_cli(self):
+        original, duplicate = self._working_line_pair()
+        MEMORY._write_events([original, duplicate], self.store)
+        (self.case_root / ".lock").unlink()
+        before = self.store.read_bytes()
+        files_before = sorted(path.name for path in self.case_root.iterdir())
+        preview = MEMORY.normalize_working_lines(self.store)
+        self.assertEqual((preview["normalized_count"], preview["removed_count"]), (1, 1))
+        self.assertEqual(preview["removed_to_retained"], {"legacy-string": "legacy-object"})
+        self.assertEqual(before, self.store.read_bytes())
+        self.assertEqual(files_before, sorted(path.name for path in self.case_root.iterdir()))
+        result = subprocess.run([sys.executable, "-B", str(SCRIPT_PATH), "--store", str(self.store), "normalize-working-lines", "--apply", "--expected-sha256", preview["sha256"]], capture_output=True, text=True, check=True, **hidden_process_options())
+        self.assertEqual(json.loads(result.stdout)["status"], "applied")
+        events = MEMORY._read_events(self.store)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["working_line"], original["working_line"])
+        self.assertEqual(events[0]["recorded_at"], original["recorded_at"])
+        self.assertEqual(events[0]["last_seen"], duplicate["last_seen"])
+        self.assertEqual(events[0]["attempt_count"], 4)
+        applied = self.store.read_bytes()
+        self.assertEqual(MEMORY.normalize_working_lines(self.store, apply=True, expected_sha256=hashlib.sha256(applied).hexdigest())["status"], "no-op")
+        self.assertEqual(applied, self.store.read_bytes())
+        repeated = MEMORY.record_event("GameOne", "render.animation", "architecture", "Animation has one owner", "Avoid competing frame writers", "One owner controls the frame sequence", "passed", working_line=duplicate["working_line"], recorded_at="2026-08-04T10:00:00Z", events_path=self.store)
+        self.assertEqual(repeated["status"], "duplicate")
+        self.assertEqual(applied, self.store.read_bytes())
+
+    def test_normalize_working_lines_preserves_referenced_member(self):
+        original, duplicate = self._working_line_pair()
+        successor = {**original, "event_id": "successor", "summary": "Animation owner was extended", "supersedes": "legacy-string", "working_line": "feature/animation"}
+        MEMORY._write_events([original, duplicate, successor], self.store)
+        preview = MEMORY.normalize_working_lines(self.store)
+        self.assertEqual(preview["removed_to_retained"], {"legacy-object": "legacy-string"})
+        MEMORY.normalize_working_lines(self.store, apply=True, expected_sha256=preview["sha256"])
+        events = MEMORY._read_events(self.store)
+        self.assertEqual({event["event_id"] for event in events}, {"legacy-string", "successor"})
+        self.assertEqual(next(event for event in events if event["event_id"] == "successor"), successor)
+        successor["supersedes"] = "Historic note retains legacy-string as the previous outcome"
+        MEMORY._write_events([original, duplicate, successor], self.store)
+        preview = MEMORY.normalize_working_lines(self.store)
+        self.assertEqual(preview["removed_to_retained"], {"legacy-object": "legacy-string"})
+        self.assertEqual(preview["opaque_supersedes_count"], 1)
+        MEMORY.normalize_working_lines(self.store, apply=True, expected_sha256=preview["sha256"])
+        self.assertEqual(next(event for event in MEMORY._read_events(self.store) if event["event_id"] == "successor"), successor)
+
+    def test_normalize_working_lines_keeps_all_referenced_duplicate_members(self):
+        original, duplicate = self._working_line_pair()
+        extra = {**original, "event_id": "legacy-extra"}
+        first_successor = {**original, "event_id": "successor-one", "summary": "First follow-up retained", "supersedes": "legacy-object", "working_line": "feature/first"}
+        second_successor = {**original, "event_id": "successor-two", "summary": "Second follow-up retained", "supersedes": "legacy-string", "working_line": "feature/second"}
+        MEMORY._write_events([original, duplicate, extra, first_successor, second_successor], self.store)
+        preview = MEMORY.normalize_working_lines(self.store)
+        self.assertEqual(preview["removed_to_retained"], {"legacy-extra": "legacy-object"})
+        MEMORY.normalize_working_lines(self.store, apply=True, expected_sha256=preview["sha256"])
+        self.assertEqual({event["event_id"] for event in MEMORY._read_events(self.store)}, {"legacy-object", "legacy-string", "successor-one", "successor-two"})
+
+    def test_normalize_working_lines_preserves_distinct_business_fields_and_plain_branches(self):
+        original, duplicate = self._working_line_pair()
+        duplicate["supersedes"] = "missing-historical-target"
+        other_project = {**original, "event_id": "other-project", "project": "GameTwo"}
+        extra_business = {**original, "event_id": "extra-business", "domain_owner": {"role": "render-controller"}}
+        plain = {**original, "event_id": "plain-branch", "working_line": "feature/render-owner"}
+        plain_duplicate = {**plain, "event_id": "plain-branch-copy"}
+        malformed = {**original, "event_id": "ambiguous-object", "working_line": '{"branch":"main","branch":"feature"}'}
+        rows = [original, duplicate, other_project, extra_business, plain, plain_duplicate, malformed]
+        MEMORY._write_events(rows, self.store)
+        preview = MEMORY.normalize_working_lines(self.store)
+        self.assertEqual((preview["normalized_count"], preview["removed_count"]), (1, 0))
+        MEMORY.normalize_working_lines(self.store, apply=True, expected_sha256=preview["sha256"])
+        after = {event["event_id"]: event for event in MEMORY._read_events(self.store)}
+        for event in (original, other_project, extra_business, plain, plain_duplicate, malformed):
+            self.assertEqual(after[event["event_id"]], event)
+        self.assertEqual(after["legacy-string"]["supersedes"], "missing-historical-target")
+
+    def test_normalize_working_lines_requires_current_hash_before_mutation(self):
+        original, duplicate = self._working_line_pair()
+        MEMORY._write_events([original, duplicate], self.store)
+        with self.assertRaisesRegex(ValueError, "requires.*expected-sha256"):
+            MEMORY.normalize_working_lines(self.store, apply=True)
+        preview = MEMORY.normalize_working_lines(self.store)
+        self.store.write_bytes(self.store.read_bytes() + b"\n")
+        changed = self.store.read_bytes()
+        with self.assertRaisesRegex(ValueError, "changed"):
+            MEMORY.normalize_working_lines(self.store, apply=True, expected_sha256=preview["sha256"])
+        self.assertEqual(changed, self.store.read_bytes())
+
+    def test_normalize_working_lines_rejects_damaged_records_and_cycles_without_writing(self):
+        original, duplicate = self._working_line_pair()
+        cases = ([original, {**duplicate, "event_id": original["event_id"]}], [original, ["not-an-event"]], [{**original, "supersedes": "legacy-string"}, {**duplicate, "supersedes": "legacy-object"}], [{**original, "attempt_count": 0}], [{**original, "recorded_at": "invalid-time"}])
+        for rows in cases:
+            with self.subTest(rows=len(rows)):
+                MEMORY._write_events(rows, self.store)
+                before = self.store.read_bytes()
+                with self.assertRaises(ValueError):
+                    MEMORY.normalize_working_lines(self.store, apply=True, expected_sha256=hashlib.sha256(before).hexdigest())
+                self.assertEqual(before, self.store.read_bytes())
+
+    def test_normalize_working_lines_rejects_symlinked_store(self):
+        original, duplicate = self._working_line_pair()
+        target = self.case_root / "actual-events.jsonl"
+        MEMORY._write_events([original, duplicate], target)
+        self.store.unlink()
+        self._symlink_or_skip(target, self.store)
+        before = target.read_bytes()
+        for apply in (False, True):
+            with self.subTest(apply=apply), self.assertRaisesRegex(ValueError, "symlink"):
+                MEMORY.normalize_working_lines(self.store, apply=apply, expected_sha256=hashlib.sha256(before).hexdigest())
+        self.assertEqual(before, target.read_bytes())
+
     def test_search_requires_project_unless_explicit_audit(self):
         with self.assertRaisesRegex(ValueError, "project is required"):
             MEMORY.search_events(events_path=self.store)
@@ -70,6 +187,79 @@ class AIMemoryTests(unittest.TestCase):
         result = MEMORY.recall_project("AbsentProject", vault_root=self.case_root, events_path=self.store)
         self.assertEqual((result["status"], result["reason"]), ("skipped", "no-related-memory"))
         self.assertFalse(self.store.exists())
+
+    def test_recall_preserves_exact_camel_case_symbol_lookup(self):
+        MEMORY.add_project("GameOne", self.case_root)
+        knowledge = self.case_root / "Projects/GameOne/Knowledge.md"
+        knowledge.write_text("# GameOne\n\n## Movement owner\nSpriteJob owns movement state.\n", encoding="utf-8")
+        result = MEMORY.recall_project("GameOne", query="SpriteJob", vault_root=self.case_root, events_path=self.store)
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("spritejob", result["sections"][0]["matched_terms"])
+
+    def test_recall_ranks_bilingual_technical_matches_before_newer_module_only_events(self):
+        relevant = MEMORY.record_event("GameOne", "render.sprite-jobs", "architecture", "Sprite animation has one owner", "Avoid competing animation writers", "Sprite jobs control the frame sequence", "passed", recorded_at="2026-08-01T10:00:00Z", events_path=self.store)
+        MEMORY.record_event("GameOne", "animation", "operation", "Build documentation refreshed", "Keep command examples current", "Documentation reviewed", "passed", recorded_at="2026-08-02T10:00:00Z", events_path=self.store)
+        MEMORY.record_event("GameTwo", "render.sprite-jobs", "architecture", "Sprite animation belongs to another project", "Separate project ownership", "Another project remains isolated", "passed", events_path=self.store)
+        recalled = MEMORY.recall_project("GameOne", "animation", "请帮我修改精灵动画", 1, self.case_root, self.store)
+        self.assertEqual([row["event_id"] for row in recalled["matches"]], [relevant["event_id"]])
+        self.assertIn("sprite", recalled["matches"][0]["matched_terms"])
+        self.assertEqual(recalled["recall_evidence"]["scope"], "current-retrieval-only")
+        self.assertEqual(recalled["recall_evidence"]["returned"], {"sections": 0, "events": 1})
+        self.assertNotIn("GameTwo", json.dumps(recalled))
+
+    def test_recall_uses_module_as_hint_and_search_keeps_strict_filters(self):
+        written = MEMORY.record_event("GameOne", "report.export", "bug-fix", "PDF layout repaired", "Long table overflowed the page", "Report layout fits the page", "passed", issue_id="report-layout", events_path=self.store)
+        for query in ("PDF 排版", "pdf layout missing-extra-word"):
+            with self.subTest(query=query):
+                recalled = MEMORY.recall_project("GameOne", "pdf", query, vault_root=self.case_root, events_path=self.store)
+                self.assertEqual(recalled["matches"][0]["event_id"], written["event_id"])
+        self.assertEqual(MEMORY.search_events("GameOne", "pdf", "pdf layout", events_path=self.store)["matches"], [])
+        self.assertEqual(MEMORY.search_events("GameOne", "report.export", "pdf layout missing-extra-word", events_path=self.store)["matches"], [])
+        self.assertEqual(len(MEMORY.search_events("GameOne", "report.export", "pdf layout", events_path=self.store)["matches"]), 1)
+        self.assertEqual(len(MEMORY.recall_project("GameOne", "report", vault_root=self.case_root, events_path=self.store)["matches"]), 1)
+
+    def test_recall_chinese_partial_terms_and_short_ascii_boundaries(self):
+        written = MEMORY.record_event("GameOne", "network.connection", "bug-fix", "断网重连恢复状态", "网络断开后需要恢复连接", "重连成功并恢复游戏状态", "passed", issue_id="network-reconnection", events_path=self.store)
+        MEMORY.record_event("GameOne", "build.runner", "operation", "Build verification repaired", "Runner stopped unexpectedly", "Build completes successfully", "passed", events_path=self.store)
+        recalled = MEMORY.recall_project("GameOne", query="断网之后怎样重连", vault_root=self.case_root, events_path=self.store)
+        self.assertEqual([row["event_id"] for row in recalled["matches"]], [written["event_id"]])
+        self.assertIn("重连", recalled["matches"][0]["matched_terms"])
+        self.assertEqual(MEMORY.recall_project("GameOne", query="UI", vault_root=self.case_root, events_path=self.store)["status"], "skipped")
+
+    def test_recall_excludes_superseded_events_without_crossing_project_or_exposing_session(self):
+        first = MEMORY.record_event("GameOne", "network.connection", "architecture", "Connection retry uses the old policy", "Initial retry rules", "Previous retry limit applied", "passed", events_path=self.store)
+        second = MEMORY.record_event("GameOne", "network.connection", "architecture", "Connection retry uses the current policy", "Retries need bounded backoff", "Current retry limit applied", "passed", session_id="11111111-1111-4111-8111-111111111111", task_name="private task label", events_path=self.store)
+        other = MEMORY.record_event("GameTwo", "network.connection", "architecture", "Connection retry uses an independent policy", "Other project owns separate retry rules", "Separate retry limit applied", "passed", events_path=self.store)
+        rows = MEMORY._read_events(self.store)
+        next(row for row in rows if row["event_id"] == second["event_id"])["supersedes"] = first["event_id"]
+        next(row for row in rows if row["event_id"] == other["event_id"])["supersedes"] = second["event_id"]
+        MEMORY._write_events(rows, self.store)
+        recalled = MEMORY.recall_project("GameOne", query="retry", vault_root=self.case_root, events_path=self.store)
+        self.assertEqual([row["event_id"] for row in recalled["matches"]], [second["event_id"]])
+        self.assertNotIn("11111111-1111-4111-8111-111111111111", json.dumps(recalled))
+        self.assertNotIn("private task label", json.dumps(recalled))
+        self.assertEqual(len(MEMORY.search_events("GameOne", query="retry", events_path=self.store)["matches"]), 2)
+
+    def test_recall_returns_matching_excerpt_from_long_knowledge_section(self):
+        MEMORY.add_project("GameOne", self.case_root)
+        knowledge = self.case_root / "Projects" / "GameOne" / "Knowledge.md"
+        knowledge.write_text("# GameOne\n\n## Rendering ownership\n\n" + "General rendering detail. " * 200 + "\n\nSprite animation frame ownership belongs to the job runner.\n", encoding="utf-8")
+        recalled = MEMORY.recall_project("GameOne", query="精灵动画", vault_root=self.case_root, events_path=self.store)
+        section = recalled["sections"][0]
+        self.assertIn("Sprite animation frame ownership", section["text"])
+        self.assertLessEqual(len(section["text"]), 2400)
+        self.assertTrue(section["truncated"])
+        self.assertIn("animation", section["matched_terms"])
+
+    def test_recall_unmatched_evidence_is_read_only_and_explicit(self):
+        MEMORY.record_event("GameOne", "build.runner", "operation", "Build command reviewed", "Build runner changed", "Build completed", "passed", events_path=self.store)
+        before = self.store.read_bytes()
+        recalled = MEMORY.recall_project("GameOne", query="orbital telemetry", vault_root=self.case_root, events_path=self.store)
+        self.assertEqual(recalled["status"], "skipped")
+        self.assertEqual(recalled["recall_evidence"]["matched_terms"], [])
+        self.assertEqual(recalled["recall_evidence"]["unmatched_terms"], ["orbital", "telemetry"])
+        self.assertEqual(before, self.store.read_bytes())
+        self.assertEqual(MEMORY.recall_project("GameOne", query="please", vault_root=self.case_root, events_path=self.store)["status"], "skipped")
 
     def test_recall_rejects_traversal_and_symlinked_projects(self):
         for name in ("..", "../GameOne", "nested/GameOne", "nested\\GameOne"):
