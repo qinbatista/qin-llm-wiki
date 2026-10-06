@@ -173,11 +173,50 @@ class AIMemoryTests(unittest.TestCase):
                 MEMORY.record_event(project, "ui", "architecture", f"Interface ownership change {number}", "Clarify interface ownership", f"Interface behavior {number} updated", "passed", events_path=self.store)
         recalled = MEMORY.recall_project("GameOne", "ui", "interface", 100, self.case_root, self.store)
         self.assertEqual(recalled["status"], "ok")
-        self.assertEqual(len(recalled["matches"]), 5)
-        self.assertTrue(all(row["project"] == "GameOne" for row in recalled["matches"]))
+        self.assertEqual(recalled["matches"], [])
+        self.assertEqual(recalled["recall_evidence"]["limits"]["events"], 0)
+        self.assertNotIn("event-store", recalled["recall_evidence"]["sources"])
         self.assertEqual(len(recalled["sections"]), 1)
         self.assertNotIn("GameTwo", json.dumps(recalled))
         self.assertNotIn("Unrelated storage", json.dumps(recalled))
+        historical = MEMORY.recall_project("GameOne", "ui", "interface", 100, self.case_root, self.store, include_history=True)
+        self.assertEqual(len(historical["matches"]), 5)
+        self.assertTrue(all(row["project"] == "GameOne" and not row["eligible_current_context"] and row["context_role"] == "historical_evidence" for row in historical["matches"]))
+
+    def test_recall_default_does_not_read_event_store_and_cli_history_is_explicit(self):
+        MEMORY.add_project("GameOne", self.case_root)
+        knowledge = self.case_root / "Projects/GameOne/Knowledge.md"
+        knowledge.write_text("# GameOne\n\n## Current owner\nMemory uses the current reader.\n", encoding="utf-8")
+        self.store.write_text("invalid event history", encoding="utf-8")
+        command = [sys.executable, "-B", str(SCRIPT_PATH), "--vault", str(self.case_root), "--store", str(self.store), "recall", "--project", "GameOne", "--query", "memory"]
+        result = subprocess.run(command, capture_output=True, text=True, check=True, **hidden_process_options())
+        self.assertEqual(json.loads(result.stdout)["matches"], [])
+        self.store.unlink()
+        MEMORY.record_event("GameOne", "memory", "architecture", "Memory used an earlier reader", "Retain prior evidence", "Historical reader remains available", "passed", events_path=self.store)
+        result = subprocess.run([*command, "--include-history"], capture_output=True, text=True, check=True, **hidden_process_options())
+        historical = json.loads(result.stdout)
+        self.assertEqual(len(historical["matches"]), 1)
+        self.assertFalse(historical["matches"][0]["eligible_current_context"])
+
+    def test_recall_structured_owner_does_not_fall_back_to_readable_prose(self):
+        MEMORY.add_project("GameOne", self.case_root)
+        owner = self.case_root / "Projects/GameOne"
+        (owner / "Knowledge.md").write_text("# GameOne\n\n## Obsolete owner\nMemory still uses the obsolete owner.\n", encoding="utf-8")
+        (owner / "Memory.json").write_text("{}", encoding="utf-8")
+        recalled = MEMORY.recall_project("GameOne", query="memory", vault_root=self.case_root, events_path=self.store)
+        self.assertEqual((recalled["status"], recalled["reason"]), ("skipped", "structured_current_index_requires_exact_root_reader"))
+        self.assertEqual(recalled["sections"], [])
+        self.assertNotIn("obsolete", json.dumps(recalled))
+        historical = MEMORY.recall_project("GameOne", query="memory", vault_root=self.case_root, events_path=self.store, include_history=True)
+        self.assertEqual(historical["sections"], [])
+
+    def test_recall_excludes_explicit_legacy_history_from_project_prose(self):
+        MEMORY.add_project("GameOne", self.case_root)
+        knowledge = self.case_root / "Projects/GameOne/Knowledge.md"
+        knowledge.write_text("# GameOne\n\n<!-- BEGIN LEGACY MODULE MEMORY HISTORY -->\n## Prior protocol\nMemory uses the retired protocol.\n<!-- END LEGACY MODULE MEMORY HISTORY -->\n\n## Current owner\nMemory uses the current reader.\n", encoding="utf-8")
+        recalled = MEMORY.recall_project("GameOne", query="memory", vault_root=self.case_root, events_path=self.store)
+        self.assertIn("current reader", json.dumps(recalled))
+        self.assertNotIn("retired protocol", json.dumps(recalled))
 
     def test_recall_missing_memory_skips_without_creating_files(self):
         missing = self.case_root / "missing-vault"
@@ -200,7 +239,7 @@ class AIMemoryTests(unittest.TestCase):
         relevant = MEMORY.record_event("GameOne", "render.sprite-jobs", "architecture", "Sprite animation has one owner", "Avoid competing animation writers", "Sprite jobs control the frame sequence", "passed", recorded_at="2026-08-01T10:00:00Z", events_path=self.store)
         MEMORY.record_event("GameOne", "animation", "operation", "Build documentation refreshed", "Keep command examples current", "Documentation reviewed", "passed", recorded_at="2026-08-02T10:00:00Z", events_path=self.store)
         MEMORY.record_event("GameTwo", "render.sprite-jobs", "architecture", "Sprite animation belongs to another project", "Separate project ownership", "Another project remains isolated", "passed", events_path=self.store)
-        recalled = MEMORY.recall_project("GameOne", "animation", "请帮我修改精灵动画", 1, self.case_root, self.store)
+        recalled = MEMORY.recall_project("GameOne", "animation", "请帮我修改精灵动画", 1, self.case_root, self.store, include_history=True)
         self.assertEqual([row["event_id"] for row in recalled["matches"]], [relevant["event_id"]])
         self.assertIn("sprite", recalled["matches"][0]["matched_terms"])
         self.assertEqual(recalled["recall_evidence"]["scope"], "current-retrieval-only")
@@ -211,17 +250,17 @@ class AIMemoryTests(unittest.TestCase):
         written = MEMORY.record_event("GameOne", "report.export", "bug-fix", "PDF layout repaired", "Long table overflowed the page", "Report layout fits the page", "passed", issue_id="report-layout", events_path=self.store)
         for query in ("PDF 排版", "pdf layout missing-extra-word"):
             with self.subTest(query=query):
-                recalled = MEMORY.recall_project("GameOne", "pdf", query, vault_root=self.case_root, events_path=self.store)
+                recalled = MEMORY.recall_project("GameOne", "pdf", query, vault_root=self.case_root, events_path=self.store, include_history=True)
                 self.assertEqual(recalled["matches"][0]["event_id"], written["event_id"])
         self.assertEqual(MEMORY.search_events("GameOne", "pdf", "pdf layout", events_path=self.store)["matches"], [])
         self.assertEqual(MEMORY.search_events("GameOne", "report.export", "pdf layout missing-extra-word", events_path=self.store)["matches"], [])
         self.assertEqual(len(MEMORY.search_events("GameOne", "report.export", "pdf layout", events_path=self.store)["matches"]), 1)
-        self.assertEqual(len(MEMORY.recall_project("GameOne", "report", vault_root=self.case_root, events_path=self.store)["matches"]), 1)
+        self.assertEqual(len(MEMORY.recall_project("GameOne", "report", vault_root=self.case_root, events_path=self.store, include_history=True)["matches"]), 1)
 
     def test_recall_chinese_partial_terms_and_short_ascii_boundaries(self):
         written = MEMORY.record_event("GameOne", "network.connection", "bug-fix", "断网重连恢复状态", "网络断开后需要恢复连接", "重连成功并恢复游戏状态", "passed", issue_id="network-reconnection", events_path=self.store)
         MEMORY.record_event("GameOne", "build.runner", "operation", "Build verification repaired", "Runner stopped unexpectedly", "Build completes successfully", "passed", events_path=self.store)
-        recalled = MEMORY.recall_project("GameOne", query="断网之后怎样重连", vault_root=self.case_root, events_path=self.store)
+        recalled = MEMORY.recall_project("GameOne", query="断网之后怎样重连", vault_root=self.case_root, events_path=self.store, include_history=True)
         self.assertEqual([row["event_id"] for row in recalled["matches"]], [written["event_id"]])
         self.assertIn("重连", recalled["matches"][0]["matched_terms"])
         self.assertEqual(MEMORY.recall_project("GameOne", query="UI", vault_root=self.case_root, events_path=self.store)["status"], "skipped")
@@ -234,7 +273,7 @@ class AIMemoryTests(unittest.TestCase):
         next(row for row in rows if row["event_id"] == second["event_id"])["supersedes"] = first["event_id"]
         next(row for row in rows if row["event_id"] == other["event_id"])["supersedes"] = second["event_id"]
         MEMORY._write_events(rows, self.store)
-        recalled = MEMORY.recall_project("GameOne", query="retry", vault_root=self.case_root, events_path=self.store)
+        recalled = MEMORY.recall_project("GameOne", query="retry", vault_root=self.case_root, events_path=self.store, include_history=True)
         self.assertEqual([row["event_id"] for row in recalled["matches"]], [second["event_id"]])
         self.assertNotIn("11111111-1111-4111-8111-111111111111", json.dumps(recalled))
         self.assertNotIn("private task label", json.dumps(recalled))
@@ -295,14 +334,58 @@ class AIMemoryTests(unittest.TestCase):
             MEMORY.migrate_coverage(self.store)
         self.assertEqual(before, self.store.read_bytes())
 
-    def test_repeated_issue_updates_one_row(self):
-        first = MEMORY.record_event("GameOne", "combat.damage", "bug-fix", "Damage is wrong", "Multiplier ordering", "Monitoring remains active", "partial", issue_id="combat-001", issue_status="MONITORING", files=["src/combat.py"], events_path=self.store)
-        second = MEMORY.record_event("GameOne", "combat.damage", "bug-fix", "Damage calculation fixed", "Multiplier reordered", "Focused checks pass", "passed", issue_id="combat-001", issue_status="RESOLVED", files=["src/combat.py"], events_path=self.store)
+    def test_repeated_issue_preserves_attempts_and_projects_only_latest_status(self):
+        first = MEMORY.record_event("GameOne", "combat.damage", "bug-fix", "Damage is wrong", "Users repeatedly see incorrect rounded damage", "Monitoring remains active", "partial", issue_id="combat-001", issue_status="MONITORING", files=["src/combat.py"], decisions=["Try applying the multiplier before rounding"], risks=["Rounding regression remains unresolved"], verification=["The damage output still differs"], events_path=self.store)
+        original = MEMORY._read_events(self.store)[0]
+        arguments = {"project": "GameOne", "module": "combat.damage", "event_type": "bug-fix", "summary": "Damage calculation fixed", "reason": "Multiplier reordered", "result": "Focused checks pass", "verification_status": "passed", "issue_id": "combat-001", "issue_status": "RESOLVED", "files": ["src/combat.py"], "verification": ["Observed corrected damage output"], "events_path": self.store}
+        second = MEMORY.record_event(**arguments)
         events = MEMORY._read_events(self.store)
         self.assertEqual(first["status"], "written")
         self.assertEqual(second["status"], "updated")
-        self.assertEqual(len(events), 1)
-        self.assertEqual(events[0]["attempt_count"], 2)
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0], original)
+        self.assertEqual(events[1]["attempt_count"], 2)
+        self.assertEqual(events[1]["supersedes"], first["event_id"])
+        self.assertNotEqual(first["event_id"], second["event_id"])
+        before = self.store.read_bytes()
+        replay = MEMORY.record_event(**arguments, session_id="11111111-1111-4111-8111-111111111111")
+        self.assertEqual(replay["status"], "duplicate")
+        self.assertEqual(replay["event_id"], second["event_id"])
+        self.assertEqual(self.store.read_bytes(), before)
+        with self.assertRaisesRegex(ValueError, "Changed issue outcomes require record"):
+            MEMORY.amend_event(second["event_id"], result="Deployment is now complete", events_path=self.store)
+        self.assertEqual(self.store.read_bytes(), before)
+        recall = MEMORY.recall_project("GameOne", query="damage", vault_root=self.case_root, events_path=self.store, include_history=True)
+        recalled = {event["event_id"]: event for event in recall["matches"]}
+        self.assertEqual(len(recalled), 2)
+        self.assertFalse(recalled[first["event_id"]]["issue_is_current"])
+        self.assertTrue(recalled[second["event_id"]]["issue_is_current"])
+        self.assertEqual(recalled[first["event_id"]]["reason"], original["reason"])
+        self.assertEqual(recalled[first["event_id"]]["risks"], original["risks"])
+        self.assertTrue(all(event["eligible_current_context"] is False for event in recalled.values()))
+        self.assertEqual(MEMORY.search_events("GameOne", issue_status="MONITORING", events_path=self.store)["matches"], [])
+        MEMORY.record_event("GameTwo", "combat.damage", "bug-fix", "Independent damage problem", "Other project's rounding", "Still investigating", "failed", issue_id="combat-001", events_path=self.store)
+        MEMORY.render_views(self.store, self.case_root / "Recent Work.md", self.case_root / "Memory Dashboard.md", self.case_root / "Issues.md")
+        active_section = (self.case_root / "Issues.md").read_text().split("## Recent Resolved Bugs")[0]
+        self.assertNotIn("Damage is wrong", active_section)
+        self.assertIn("Independent damage problem", active_section)
+        self.assertIn("| GameOne | 2 | 1 | 0 |", (self.case_root / "Memory Dashboard.md").read_text())
+
+    def test_passing_check_requires_explicit_issue_resolution(self):
+        MEMORY.record_event("GameOne", "deploy", "bug-fix", "Deployment fix prepared", "Users cannot access the release", "Focused checks pass; deployment remains pending", "passed", issue_id="deploy-001", events_path=self.store)
+        current = MEMORY.search_events("GameOne", issue_status="MONITORING", events_path=self.store)["matches"]
+        self.assertEqual(len(current), 1)
+        self.assertEqual(current[0]["issue_status"], "MONITORING")
+        self.assertEqual(MEMORY.search_events("GameOne", issue_status="RESOLVED", events_path=self.store)["matches"], [])
+
+    def test_reopened_issue_selects_latest_revision_even_with_equal_timestamps(self):
+        arguments = {"project": "GameOne", "module": "combat.damage", "event_type": "bug-fix", "reason": "The rounding behavior changed", "issue_id": "combat-001", "recorded_at": "2026-08-01T10:00:00Z", "events_path": self.store}
+        first = MEMORY.record_event(**arguments, summary="Damage repaired", result="Correct output observed", verification_status="passed", issue_status="RESOLVED")
+        second = MEMORY.record_event(**arguments, summary="Damage regression reproduced", result="Wrong output observed", verification_status="failed")
+        active = MEMORY.search_events("GameOne", issue_status="ACTIVE", events_path=self.store)["matches"]
+        self.assertEqual([event["event_id"] for event in active], [second["event_id"]])
+        self.assertEqual(active[0]["supersedes"], first["event_id"])
+        self.assertEqual(MEMORY.search_events("GameOne", issue_status="RESOLVED", events_path=self.store)["matches"], [])
 
     def test_issue_update_is_resorted_before_bounded_search(self):
         MEMORY.record_event("GameOne", "combat.damage", "bug-fix", "Initial damage issue", "Rounding order", "Monitoring remains active", "partial", issue_id="combat-001", files=["src/combat.py"], recorded_at="2026-08-01T10:00:00Z", events_path=self.store)
@@ -316,11 +399,16 @@ class AIMemoryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             MEMORY.record_event("GameOne", "combat.damage", "bug-fix", "Damage calculation fixed", "Multiplier reordered", "Focused checks pass", "passed", files=["src/combat.py"], events_path=self.store)
 
-    def test_compact_search_crosses_session_provenance_without_exposing_evidence(self):
-        MEMORY.record_event("GameOne", "combat.damage", "verification", "Verified critical damage", "Rounding order changed", "Focused checks pass", "passed", files=["src/combat.py"], verification=["long evidence"], recorded_at="2026-08-01T10:00:00Z", events_path=self.store, task_name="critical damage", session_id="11111111-1111-4111-8111-111111111111")
+    def test_compact_search_keeps_bounded_cause_evidence_and_limits_without_session_labels(self):
+        MEMORY.record_event("GameOne", "combat.damage", "verification", "Verified critical damage", "Rounding order changed", "Focused checks pass", "passed", files=["src/combat.py"], verification=["Observed corrected output"], decisions=["Keep the user's expected rounding order"], risks=[f"Pending acceptance boundary {number}" for number in range(4)], recorded_at="2026-08-01T10:00:00Z", events_path=self.store, task_name="critical damage", session_id="11111111-1111-4111-8111-111111111111")
         compact = MEMORY.search_events("GameOne", "combat.damage", "critical", compact=True, events_path=self.store, task_name="another task", session_id="22222222-2222-4222-8222-222222222222")
         self.assertEqual(len(compact["matches"]), 1)
-        self.assertNotIn("verification", compact["matches"][0])
+        self.assertEqual(compact["matches"][0]["reason"], "Rounding order changed")
+        self.assertEqual(compact["matches"][0]["verification"], ["Observed corrected output"])
+        self.assertEqual(compact["matches"][0]["decisions"], ["Keep the user's expected rounding order"])
+        self.assertEqual(len(compact["matches"][0]["risks"]), 3)
+        self.assertTrue(compact["matches"][0]["details_truncated"])
+        self.assertNotIn("11111111-1111-4111-8111-111111111111", json.dumps(compact))
         self.assertEqual(compact["matches"][0]["scope_relation"], "project_result_provenance")
         self.assertEqual(compact["matches"][0]["provenance_relation"], "unrelated_session")
 

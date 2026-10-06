@@ -25,14 +25,14 @@ REQUIRED_KNOWLEDGE_FILES = ("Knowledge/Reusable Lessons/index.md", "Knowledge/Re
 FORBIDDEN_ENTRIES = ("_System", "raw", "Journal", "Archive", "History")
 SKIPPED_SCAN_PARTS = {".git", ".venv", "__pycache__", ".pytest_cache", "Cache", "build", "dist"}
 TEXT_SUFFIXES = {".md", ".py", ".toml", ".txt", ".json", ".jsonl", ".yaml", ".yml", ".ini", ".cfg"}
-VERIFY_CACHE_RELATIVE = Path("Cache") / "tmp-llm-wiki-architecture"
+VERIFY_CACHE_RELATIVE = Path("Cache") / "temp-llm-wiki-architecture"
 MUTATION_DIRECTORIES = ("AI Memory", "AI Memory/tests", "Projects", "Knowledge", "Preferences", "Skills")
 GENERATED_FILES = ("Recent Work.md", "Memory Dashboard.md", "Issues.md")
 SEED_REQUIRED_FRAGMENTS = {
     "Start Here.md": ("- [[Knowledge/Memory Retrieval|Memory Retrieval]]",),
     "Knowledge/index.md": ("- [[Knowledge/Reusable Lessons/index|Reusable Lessons]]", "- [[Knowledge/Book References/index|Book References]]", "- [[Knowledge/Memory Retrieval|Memory Retrieval]]"),
     "Knowledge/Project Learning.md": ("Current lifecycle: recall only the exact project; skip absent memory; verify in the original task; Ending only summarizes and writes durable facts with the user-selected model and effort.",),
-    "Knowledge/Privacy and Safety.md": ("- Run production memory writes only for real outcomes. Put probes, fixtures, and failure simulations in an explicit disposable store and vault under the active project's `Cache/tmp-*/` tree.", "- Treat malformed path components, bytecode, system metadata, empty canvases, placeholder events, and unreachable pages as integrity failures rather than hidden clutter."),
+    "Knowledge/Privacy and Safety.md": ("- Run production memory writes only for real outcomes. Put probes, fixtures, and failure simulations in an explicit disposable store and vault under the active project's `Cache/temp-<task>/` tree.", "- Treat malformed path components, bytecode, system metadata, empty canvases, placeholder events, and unreachable pages as integrity failures rather than hidden clutter."),
     "Knowledge/Reusable Lessons/index.md": ("- [[Knowledge/Reusable Lessons/Candidates|Candidate Queue]]",),
     "Preferences/index.md": ("- [[Preferences/AI Captured Preferences|AI Captured Preferences]]",),
 }
@@ -366,7 +366,7 @@ def _prepare_disposable_directory(vault_path, name):
     cache_root.mkdir(parents=True, exist_ok=True)
     target_path = cache_root / name
     if target_path.parent.resolve() != cache_root or target_path.is_symlink():
-        raise ValueError("Disposable verification path escaped the vault Cache/tmp-* boundary")
+        raise ValueError("Disposable verification path escaped the vault Cache/temp-<task> boundary")
     if target_path.exists():
         shutil.rmtree(target_path)
     target_path.mkdir(parents=True)

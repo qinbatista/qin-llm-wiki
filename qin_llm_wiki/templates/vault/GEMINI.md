@@ -1,3 +1,3 @@
 # Gemini memory entry
 
-Google Antigravity and Gemini entry point. Read [[AGENTS]] before accessing memory, use `AI Memory/ai_memory.py` for project-scoped recall, and summarize durable change records at completion. Missing memory is a normal skip.
+Google Antigravity and Gemini entry point. Read [[AGENTS]] before accessing memory. Follow its exact-project reader, current-knowledge writer and closeout maintenance rules. Missing memory is a normal skip; structured owners never fall back to prose or history.

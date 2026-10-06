@@ -13,7 +13,7 @@ from qin_llm_wiki.hidden_process import hidden_process_options
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-TEST_CACHE_ROOT = PROJECT_ROOT / "Cache" / "tmp-llm-wiki-architecture"
+TEST_CACHE_ROOT = Path(os.environ.get("QIN_LLM_WIKI_TEST_CACHE", PROJECT_ROOT / "Cache" / "temp-llm-wiki-architecture")).expanduser().resolve()
 
 
 class WikiGeneratorTests(unittest.TestCase):
@@ -77,9 +77,9 @@ class WikiGeneratorTests(unittest.TestCase):
         check_statuses = {check["check_id"]: check["status"] for check in audit["check_runs"]}
         self.assertEqual(audit["status"], "pass", audit["errors"])
         self.assertEqual(check_statuses, {"architecture-structure": "pass", "vault-integrity": "pass", "runtime-unit-tests": "pass", "record-search-render-replay": "pass"})
-        self.assertFalse((self.vault_path / "Cache" / "tmp-llm-wiki-architecture" / "runtime-replay").exists())
+        self.assertFalse((self.vault_path / "Cache" / "temp-llm-wiki-architecture" / "runtime-replay").exists())
 
-    def test_runtime_records_and_updates_one_issue(self):
+    def test_runtime_preserves_issue_history_and_updates_current_view(self):
         _write_architecture(self.vault_path, "Example Wiki", False)
         runtime_path = self.vault_path / "AI Memory" / "ai_memory.py"
         specification = importlib.util.spec_from_file_location("generated_ai_memory", runtime_path)
@@ -93,8 +93,11 @@ class WikiGeneratorTests(unittest.TestCase):
         audit = verify_vault(self.vault_path, run_runtime=False)
         self.assertEqual(first["status"], "written")
         self.assertEqual(second["attempt_count"], 2)
-        self.assertEqual(len(compact["matches"]), 1)
+        self.assertEqual(len(compact["matches"]), 2)
         self.assertEqual(compact["matches"][0]["attempt_count"], 2)
+        self.assertTrue(compact["matches"][0]["issue_is_current"])
+        self.assertFalse(compact["matches"][1]["issue_is_current"])
+        self.assertNotIn("Critical damage is wrong", (self.vault_path / "Issues.md").read_text().split("## Recent Resolved Bugs")[0])
         self.assertEqual(audit["status"], "pass", audit["errors"])
 
     def test_update_preserves_user_content_events_and_classified_lessons(self):
@@ -273,7 +276,7 @@ class WikiGeneratorTests(unittest.TestCase):
         _write_architecture(self.vault_path, "Example Wiki", False)
         test_directory = self.vault_path / "AI Memory" / "tests"
         environment = os.environ.copy()
-        environment["QIN_LLM_WIKI_TEST_CACHE"] = str(Path("Cache") / "tmp-direct-runtime")
+        environment["QIN_LLM_WIKI_TEST_CACHE"] = str(Path("Cache") / "temp-direct-runtime")
         completed = subprocess.run([sys.executable, "-B", "-m", "unittest", "discover", "-s", str(test_directory), "-p", "test_*.py", "-v"], cwd=self.vault_path, env=environment, text=True, capture_output=True, check=False, **hidden_process_options())
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
 

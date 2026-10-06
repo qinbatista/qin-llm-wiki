@@ -19,8 +19,8 @@ ROOT_ENTRY_FILES = ("Start Here.md", "AGENTS.md", "CLAUDE.md", "GEMINI.md", "ins
 ALLOW_EMPTY_FILES = {"AI Memory/.lock", "AI Memory/events.jsonl"}
 TEXT_SUFFIXES = {".md", ".py", ".json", ".jsonl", ".canvas", ".txt", ".yaml", ".yml"}
 FORBIDDEN_PATHS = ("_System", "raw", "Journal", "Archive", "History", "LLM Wiki Home.md", "Knowledge/Activity Index.md", "Knowledge/instruction.md", "Skills/Activity Index.md", "Skills/instruction.md", "Projects/instruction.md")
-STALE_FRAGMENTS = ("_System/ai_memory.py", "_System/AI Memory", "Journal/", "Archive/", "raw/", "Activity Index.md", "History.md", "LLM Wiki Home")
-LEGACY_OWNER_FRAGMENTS = ("event to History", "events to History", "evidence remains in History", "anchor in History", "canonical History", "project hub and History")
+STALE_FRAGMENTS = ("_System/ai_memory.py", "_System/AI Memory", "Journal/", "Archive/", "Activity Index.md", "History.md", "LLM Wiki Home")
+LEGACY_OWNER_FRAGMENTS = ("event to History", "events to History", "evidence remains in History", "anchor in History", "project hub and History")
 GHOST_FILE_NAMES = {".DS_Store", "Thumbs.db", "desktop.ini"}
 GHOST_DIRECTORY_NAMES = {"__pycache__", ".pytest_cache"}
 GHOST_SUFFIXES = {".pyc", ".pyo"}
@@ -194,7 +194,8 @@ def inspect_managed_file_access(vault_path):
             errors.append(f"Unreadable managed file {relative_path}: {error}")
             continue
         if size == 0:
-            if relative_path not in ALLOW_EMPTY_FILES:
+            project_lock = path.name == ".memory.lock" and len(path.relative_to(vault_path).parts) == 3 and path.relative_to(vault_path).parts[0] == "Projects"
+            if relative_path not in ALLOW_EMPTY_FILES and not project_lock:
                 errors.append(f"Empty managed file: {relative_path}")
             continue
         if path.suffix.lower() not in TEXT_SUFFIXES:
@@ -345,7 +346,7 @@ def inspect_event_store(events_path):
         return events, [f"Unreadable AI event store: {error}"]
     event_ids = []
     semantic_payloads = []
-    issue_keys = []
+    issue_groups = {}
     for line_number, line in enumerate(lines, start=1):
         if not line.strip():
             continue
@@ -403,7 +404,8 @@ def inspect_event_store(events_path):
         semantic_payloads.append(json.dumps(semantic_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
         event_ids.append(str(event.get("event_id", "")).lower())
         if event.get("issue_id"):
-            issue_keys.append((str(event.get("project") or "").strip().casefold(), str(event.get("issue_id"))))
+            issue_key = (str(event.get("project") or "").strip().casefold(), str(event.get("issue_id")))
+            issue_groups.setdefault(issue_key, []).append(event)
         events.append(event)
     duplicate_ids = [event_id for event_id, count in Counter(event_ids).items() if event_id and count > 1]
     if duplicate_ids:
@@ -413,9 +415,19 @@ def inspect_event_store(events_path):
             continue
         duplicate_events = [event.get("event_id", "") for event, candidate in zip(events, semantic_payloads) if candidate == payload]
         errors.append(f"Semantic duplicate AI events: {', '.join(duplicate_events)}")
-    duplicate_issues = [f"{project}:{issue_id}" for (project, issue_id), count in Counter(issue_keys).items() if count > 1]
-    if duplicate_issues:
-        errors.append(f"Duplicate issue lifecycle rows: {', '.join(sorted(duplicate_issues)[:10])}")
+    for (project, issue_id), revisions in issue_groups.items():
+        if len(revisions) < 2:
+            continue
+        by_identifier = {event.get("event_id"): event for event in revisions}
+        predecessors = [event.get("supersedes") for event in revisions if event.get("supersedes") in by_identifier]
+        heads = [identifier for identifier in by_identifier if identifier not in predecessors]
+        visited = set()
+        cursor = heads[0] if len(heads) == 1 else None
+        while cursor in by_identifier and cursor not in visited:
+            visited.add(cursor)
+            cursor = by_identifier[cursor].get("supersedes")
+        if len(predecessors) != len(revisions) - 1 or len(set(predecessors)) != len(predecessors) or len(visited) != len(revisions):
+            errors.append(f"Invalid issue revision chain: {project}:{issue_id}")
     return events, errors
 
 

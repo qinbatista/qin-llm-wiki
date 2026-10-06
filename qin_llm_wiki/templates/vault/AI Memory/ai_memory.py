@@ -464,7 +464,18 @@ def _redact_private_value(value):
 
 
 def _issue_status_for_verification(verification_status):
-    return {"passed": "RESOLVED", "partial": "MONITORING", "failed": "ACTIVE", "not-run": "MONITORING"}[verification_status]
+    return "ACTIVE" if verification_status == "failed" else "MONITORING"
+
+
+def _latest_issue_events(events):
+    issues = [event for event in events if event.get("issue_id")]
+    superseded = {(event.get("project", "").casefold(), event["issue_id"], event.get("supersedes")) for event in issues if event.get("supersedes")}
+    latest = {}
+    for event in sorted(issues, key=lambda value: value.get("last_seen") or value.get("recorded_at") or ""):
+        identity = (event.get("project", "").casefold(), event["issue_id"])
+        if (*identity, event.get("event_id")) not in superseded:
+            latest[identity] = event
+    return list(latest.values())
 
 
 def add_project(project, vault_root=VAULT_ROOT):
@@ -524,18 +535,16 @@ def record_event(project, module, event_type, summary, reason, result, verificat
     event["event_id"] = f"{timestamp.replace('-', '').replace(':', '')[:15]}Z-{event['fingerprint'][:12]}"
 
     def operation(events):
+        existing = None
         if normalized_issue_id:
-            existing = next((candidate for candidate in events if candidate.get("project", "").lower() == event["project"].lower() and candidate.get("issue_id") == normalized_issue_id), None)
+            existing = next((candidate for candidate in _latest_issue_events(events) if candidate.get("project", "").casefold() == event["project"].casefold() and candidate.get("issue_id") == normalized_issue_id), None)
             if existing:
-                _migrate_event_provenance(existing)
-                semantic_keys = ("last_seen", "working_line", "event_type", "summary", "reason", "result", "verification_status", "module_changes", "issue_status", "bug_class", "files", "verification", "decisions", "risks", "memory_candidates", "fingerprint")
-                existing.update({key: event[key] for key in semantic_keys})
-                if any(event.get(key) for key in ("session_key", "task_scope_key", "task_group_key")):
-                    existing.update({key: event[key] for key in ("session_key", "task_scope_key", "task_group_key", "task_scope_mode")})
-                existing["attempt_count"] = int(existing.get("attempt_count", 1)) + 1
-                events.sort(key=lambda candidate: candidate.get("last_seen") or candidate.get("recorded_at") or "")
-                _write_events(events, events_path)
-                return {"status": "updated", "event_id": existing["event_id"], "issue_id": normalized_issue_id, "attempt_count": existing["attempt_count"]}
+                if _semantic_event_payload({**existing, "supersedes": ""}) == _semantic_event_payload(event):
+                    return {"status": "duplicate", "event_id": existing["event_id"], "issue_id": normalized_issue_id, "attempt_count": existing.get("attempt_count", 1)}
+                event["supersedes"] = existing["event_id"]
+                event["attempt_count"] = int(existing.get("attempt_count", 1)) + 1
+                event["fingerprint"] = _fingerprint(event)
+                event["event_id"] = f"{timestamp.replace('-', '').replace(':', '')[:15]}Z-{event['fingerprint'][:12]}"
         semantic_payload = _semantic_event_payload(event)
         duplicate = next((candidate for candidate in events if _semantic_event_payload(candidate) == semantic_payload), None)
         if duplicate:
@@ -543,7 +552,7 @@ def record_event(project, module, event_type, summary, reason, result, verificat
         events.append(event)
         events.sort(key=lambda candidate: candidate.get("last_seen") or candidate.get("recorded_at") or "")
         _write_events(events, events_path)
-        return {"status": "written", "event_id": event["event_id"], "issue_id": normalized_issue_id, "attempt_count": 1}
+        return {"status": "updated" if existing else "written", "event_id": event["event_id"], "issue_id": normalized_issue_id, "attempt_count": event["attempt_count"]}
 
     output = _with_store_lock(events_path, operation)
     if output.get("status") in {"written", "updated"}:
@@ -661,6 +670,8 @@ def amend_event(event_id, files=None, verification=None, decisions=None, risks=N
         event = next((candidate for candidate in events if candidate.get("event_id") == normalized_event_id), None)
         if event is None:
             raise ValueError("event-id does not exist")
+        if event.get("issue_id") and ((summary and summary != event.get("summary")) or (result and result != event.get("result"))):
+            raise ValueError("Changed issue outcomes require record with the same issue-id; amend only missing details")
         _migrate_event_provenance(event)
         current_files = list(event.get("files", []))
         missing_source = next((old_path for old_path, _ in normalized_replacements if old_path not in current_files), "")
@@ -746,7 +757,8 @@ def redact_private_event(event_id, events_path=EVENTS_PATH):
 
 def _compact_event(event):
     modules = [change.get("module", "") for change in event.get("module_changes", []) if change.get("module")]
-    return {"event_id": event.get("event_id", ""), "last_seen": event.get("last_seen", ""), "project": event.get("project", ""), "modules": modules, "event_type": event.get("event_type", ""), "summary": event.get("summary", ""), "result": event.get("result", ""), "verification_status": event.get("verification_status", ""), "issue_id": event.get("issue_id", ""), "issue_status": event.get("issue_status", ""), "attempt_count": event.get("attempt_count", 1), "files": event.get("files", []), "memory_candidates": event.get("memory_candidates", []), "scope_relation": event.get("scope_relation", "project_result_provenance"), "provenance_relation": event.get("provenance_relation", "unscoped_query")}
+    details = {field: event.get(field, [])[:3] for field in ("verification", "decisions", "risks")}
+    return {"event_id": event.get("event_id", ""), "last_seen": event.get("last_seen", ""), "project": event.get("project", ""), "modules": modules, "event_type": event.get("event_type", ""), "summary": event.get("summary", ""), "reason": event.get("reason", ""), "result": event.get("result", ""), "verification_status": event.get("verification_status", ""), "issue_id": event.get("issue_id", ""), "issue_status": event.get("issue_status", ""), "attempt_count": event.get("attempt_count", 1), "supersedes": event.get("supersedes", ""), "files": event.get("files", []), "memory_candidates": event.get("memory_candidates", []), **details, "details_truncated": any(len(event.get(field, [])) > 3 for field in details), "scope_relation": event.get("scope_relation", "project_result_provenance"), "provenance_relation": event.get("provenance_relation", "unscoped_query")}
 
 
 def _event_searchable_text(event):
@@ -764,7 +776,9 @@ def search_events(project="", module="", query="", issue_status="", limit=5, com
         raise ValueError("A project is required; use --all-projects only for an explicit memory audit")
     scope = _scope_context(normalized_project, module or "project-wide", task_name, session_id, session_key, task_scope_key, task_group, task_group_key)
     matches = []
-    ordered_events = sorted(_read_events(events_path), key=lambda event: event.get("last_seen") or event.get("recorded_at") or "", reverse=True)
+    events = _read_events(events_path)
+    current_issue_ids = {event.get("event_id") for event in _latest_issue_events(events)}
+    ordered_events = [event for position, event in sorted(enumerate(events), key=lambda item: (item[1].get("last_seen") or item[1].get("recorded_at") or "", item[0]), reverse=True)]
     for event in ordered_events:
         if normalized_project and event.get("project", "").lower() != normalized_project.lower():
             continue
@@ -772,7 +786,7 @@ def search_events(project="", module="", query="", issue_status="", limit=5, com
         modules = [change.get("module", "") for change in module_changes]
         if module and module.strip().lower() not in [value.lower() for value in modules]:
             continue
-        if issue_status and event.get("issue_status", "").upper() != issue_status.strip().upper():
+        if issue_status and (event.get("event_id") not in current_issue_ids or event.get("issue_status", "").upper() != issue_status.strip().upper()):
             continue
         searchable = _event_searchable_text(event).lower()
         if terms and not all(term in searchable for term in terms):
@@ -782,7 +796,10 @@ def search_events(project="", module="", query="", issue_status="", limit=5, com
             matched_event.pop(field_name, None)
         matched_event["scope_relation"] = "project_result_provenance"
         matched_event["provenance_relation"] = _event_scope_relation(event, scope)
-        matches.append(_compact_event(matched_event) if compact else matched_event)
+        matched_event = _compact_event(matched_event) if compact else matched_event
+        if event.get("issue_id"):
+            matched_event["issue_is_current"] = event.get("event_id") in current_issue_ids
+        matches.append(matched_event)
         if len(matches) >= max(1, min(limit, 25)):
             break
     return {"status": "ok" if matches else "no-matches", "matches": matches}
@@ -845,8 +862,8 @@ def _recall_excerpt(chunk, terms):
     return heading + "\n\n… " + excerpt
 
 
-def recall_project(project, module="", query="", limit=5, vault_root=VAULT_ROOT, events_path=None):
-    """Read a bounded current-truth view without crossing project ownership."""
+def recall_project(project, module="", query="", limit=5, vault_root=VAULT_ROOT, events_path=None, *, include_history=False):
+    """Read project prose separately from explicitly requested historical evidence."""
     project = _single_line(project, "project", max_length=160)
     if project in {".", ".."} or any(character in project for character in "/\\"):
         raise ValueError("project must be one exact project name")
@@ -855,20 +872,25 @@ def recall_project(project, module="", query="", limit=5, vault_root=VAULT_ROOT,
     module_terms = _recall_terms(module.replace(".", " ").replace("-", " "))
     unfiltered = not (query.strip() or module.strip())
     event_limit = min(5, max(1, limit))
-    evidence = {"scope": "current-retrieval-only", "method": "ranked-lexical-bilingual", "sources": [], "query_terms": sorted(query_terms), "module_terms": sorted(module_terms), "matched_terms": [], "unmatched_terms": sorted(query_terms), "limits": {"sections": 2, "events": event_limit}, "returned": {"sections": 0, "events": 0}}
+    evidence = {"scope": "current-retrieval-only", "method": "ranked-lexical-bilingual", "history_requested": include_history, "sources": [], "query_terms": sorted(query_terms), "module_terms": sorted(module_terms), "matched_terms": [], "unmatched_terms": sorted(query_terms), "limits": {"sections": 2, "events": event_limit if include_history else 0}, "returned": {"sections": 0, "events": 0}}
     empty = {"project": project, "sections": [], "matches": [], "recall_evidence": evidence}
     if not root.is_dir():
         return {"status": "skipped", "reason": "memory-unavailable", **empty}
     project_root = root / "Projects" / project
-    for path in (root / "Projects", project_root, project_root / "Knowledge.md", root / "AI Memory", root / "AI Memory" / "events.jsonl"):
+    for path in (root / "Projects", project_root, project_root / "Knowledge.md", project_root / "Memory.json", root / "AI Memory"):
         if path.is_symlink():
             raise ValueError("Project recall does not follow symlinked memory owners")
         path.resolve().relative_to(root.resolve())
     sections = []
     knowledge = project_root / "Knowledge.md"
-    if knowledge.is_file():
+    structured_owner = (project_root / "Memory.json").exists()
+    if structured_owner and not include_history:
+        return {"status": "skipped", "reason": "structured_current_index_requires_exact_root_reader", "current_owner": f"Projects/{project}/Memory.json", "reader": "project-memory-skill/scripts/project_knowledge.py recall --project-root ROOT --vault VAULT", **empty}
+    if knowledge.is_file() and not structured_owner:
         evidence["sources"].append(f"Projects/{project}/Knowledge.md")
-        chunks = re.split(r"(?m)(?=^## )", knowledge.read_text(encoding="utf-8"))
+        prose = knowledge.read_text(encoding="utf-8")
+        prose = re.sub(r"<!-- BEGIN LEGACY MODULE MEMORY HISTORY -->.*?<!-- END LEGACY MODULE MEMORY HISTORY -->", "", prose, flags=re.DOTALL)
+        chunks = re.split(r"(?m)(?=^## )", prose)
         ranked = []
         for index, chunk in enumerate(chunks):
             heading = chunk.splitlines()[0] if chunk.strip() else ""
@@ -881,17 +903,20 @@ def recall_project(project, module="", query="", limit=5, vault_root=VAULT_ROOT,
         for has_query_match, score, position, chunk in sorted(ranked, reverse=True)[:2]:
             excerpt = _recall_excerpt(chunk, query_terms or module_terms)
             excerpt_score, matched_terms = _recall_score(excerpt, {**module_terms, **query_terms})
-            sections.append({"file": f"Projects/{project}/Knowledge.md", "text": excerpt, "matched_terms": matched_terms, "relevance_score": score, "truncated": len(chunk.strip()) > 2400})
-    store = Path(events_path) if events_path is not None else root / "AI Memory" / "events.jsonl"
-    if store.is_symlink():
-        raise ValueError("Project recall does not follow symlinked memory owners")
-    events = [event for event in _read_events(store) if event.get("project", "").casefold() == project.casefold()]
+            sections.append({"file": f"Projects/{project}/Knowledge.md", "text": excerpt, "context_role": "project_prose", "freshness": "unverified", "matched_terms": matched_terms, "relevance_score": score, "truncated": len(chunk.strip()) > 2400})
+    events = []
+    if include_history:
+        store = Path(events_path) if events_path is not None else root / "AI Memory" / "events.jsonl"
+        if store.is_symlink():
+            raise ValueError("Project recall does not follow symlinked memory owners")
+        events = [event for event in _read_events(store) if event.get("project", "").casefold() == project.casefold()]
+        if store.is_file():
+            evidence["sources"].append("event-store" if events_path is not None else "AI Memory/events.jsonl")
     superseded = {event.get("supersedes") for event in events if event.get("supersedes") and event.get("supersedes") != event.get("event_id")}
-    if store.is_file():
-        evidence["sources"].append("event-store" if events_path is not None else "AI Memory/events.jsonl")
+    current_issue_ids = {event.get("event_id") for event in _latest_issue_events(events)}
     ranked_events = []
     for event in events:
-        if event.get("event_id") in superseded:
+        if event.get("event_id") in superseded and not event.get("issue_id"):
             continue
         searchable = _event_searchable_text(event)
         query_score, query_matches = _recall_score(searchable, query_terms)
@@ -901,7 +926,8 @@ def recall_project(project, module="", query="", limit=5, vault_root=VAULT_ROOT,
             ranked_events.append((bool(query_score), score, event.get("last_seen") or event.get("recorded_at") or "", event.get("event_id", ""), event, sorted(set(query_matches + module_matches))))
     matches = []
     for has_query_match, score, timestamp, event_id, event, matched_terms in sorted(ranked_events, key=lambda item: item[:4], reverse=True)[:event_limit]:
-        matches.append({**_compact_event(event), "matched_terms": matched_terms, "relevance_score": score})
+        issue_state = {"issue_is_current": event_id in current_issue_ids} if event.get("issue_id") else {}
+        matches.append({**_compact_event(event), **issue_state, "context_role": "historical_evidence", "eligible_current_context": False, "matched_terms": matched_terms, "relevance_score": score})
     evidence["matched_terms"] = sorted({term for item in sections + matches for term in item["matched_terms"]})
     evidence["unmatched_terms"] = sorted(set(query_terms) - set(evidence["matched_terms"]))
     evidence["returned"] = {"sections": len(sections), "events": len(matches)}
@@ -1133,14 +1159,14 @@ def render_views(events_path=EVENTS_PATH, recent_work_path=RECENT_WORK_PATH, das
         dashboard_lines = ["# Project Memory Dashboard", "", f"Generated: {current_time.isoformat(timespec='seconds').replace('+00:00', 'Z')}", "", "| Project | Events | Issues | Active / Monitoring | Modules | Last update |", "|---|---:|---:|---:|---:|---|"]
         for project in sorted(project_events):
             grouped = project_events[project]
-            issues = [event for event in grouped if event.get("issue_id")]
+            issues = _latest_issue_events(grouped)
             active = [event for event in issues if event.get("issue_status") in {"ACTIVE", "MONITORING"}]
             modules = {change.get("module") for event in grouped for change in event.get("module_changes", []) if change.get("module")}
             last_update = max(event.get("last_seen") or event.get("recorded_at") or "" for event in grouped)[:10]
             dashboard_lines.append(f"| {_project_link(project, vault_root)} | {len(grouped)} | {len(issues)} | {len(active)} | {len(modules)} | {last_update} |")
         dashboard_lines.extend(["", "- [[Issues]]", "- [[Start Here]]", ""])
         _write_confined_text(vault_root, dashboard_path, "\n".join(dashboard_lines), "Memory Dashboard owner")
-        ordered_events = sorted(events, key=lambda event: event.get("last_seen") or event.get("recorded_at") or "", reverse=True)
+        ordered_events = sorted(_latest_issue_events(events), key=lambda event: event.get("last_seen") or event.get("recorded_at") or "", reverse=True)
         current_issues = [event for event in ordered_events if event.get("issue_status") in {"ACTIVE", "MONITORING"}]
         resolved_issues = [event for event in ordered_events if event.get("issue_status") == "RESOLVED"][:20]
         issue_lines = ["# Issues", "", "Generated from stable issue IDs in `AI Memory/events.jsonl`.", "", "## Active and Monitoring"]
@@ -1234,6 +1260,7 @@ def main():
     recall_parser.add_argument("--module", default="")
     recall_parser.add_argument("--query", default="")
     recall_parser.add_argument("--limit", type=int, default=5)
+    recall_parser.add_argument("--include-history", action="store_true", help="Include bounded historical evidence, separate from current project context")
     subparsers.add_parser("render")
     subparsers.add_parser("status")
     arguments = parser.parse_args()
@@ -1260,7 +1287,7 @@ def main():
     elif arguments.command == "search":
         output = search_events(arguments.project, arguments.module, arguments.query, arguments.issue_status, arguments.limit, arguments.compact, arguments.store, arguments.task_name, arguments.session_id, task_group=arguments.task_group, all_projects=arguments.all_projects)
     elif arguments.command == "recall":
-        output = recall_project(arguments.project, arguments.module, arguments.query, arguments.limit, arguments.vault, arguments.store if arguments.store != EVENTS_PATH else None)
+        output = recall_project(arguments.project, arguments.module, arguments.query, arguments.limit, arguments.vault, arguments.store if arguments.store != EVENTS_PATH else None, include_history=arguments.include_history)
     elif arguments.command == "render":
         vault_path = arguments.vault.expanduser().resolve()
         output = render_views(arguments.store, vault_path / "Recent Work.md", vault_path / "Memory Dashboard.md", vault_path / "Issues.md")

@@ -75,6 +75,13 @@ class MemoryLintTests(unittest.TestCase):
         self.assertEqual(audit["ai_memory"]["events"], 0)
         self.assertGreater(audit["reachable_pages"], 10)
 
+    def test_project_writer_locks_are_runtime_files_and_other_empty_files_still_fail(self):
+        self._write_fixture_file("Projects/Example/.memory.lock", "")
+        self._write_fixture_file("Projects/Example/empty-note.md", "")
+        errors = LINT.inspect_managed_file_access(self.case_root)[1]
+        self.assertNotIn("Empty managed file: Projects/Example/.memory.lock", errors)
+        self.assertIn("Empty managed file: Projects/Example/empty-note.md", errors)
+
     def test_imported_fix_outcome_does_not_invent_an_issue_lifecycle(self):
         event = {**self._valid_event(), "event_type": "bug-fix"}
         self._write_events([event])
@@ -83,6 +90,32 @@ class MemoryLintTests(unittest.TestCase):
         self._write_events([event])
         errors = LINT.inspect_event_store(self.case_root / "AI Memory" / "events.jsonl")[1]
         self.assertTrue(any("issue record requires a stable issue_id" in error for error in errors))
+
+    def test_issue_revisions_require_one_connected_project_scoped_chain(self):
+        first = {**self._valid_event("issue-first"), "record_kind": "issue", "issue_id": "memory-001", "issue_status": "ACTIVE", "summary": "Memory problem reproduced"}
+        second = {**first, "event_id": "issue-second", "supersedes": "issue-first", "issue_status": "RESOLVED", "summary": "Memory problem resolved", "attempt_count": 2}
+        self._write_events([first, second])
+        self.assertEqual(LINT.inspect_event_store(self.case_root / "AI Memory/events.jsonl")[1], [])
+        cases = [([first, {**second, "supersedes": ""}], "disconnected"), ([first, second, {**second, "event_id": "issue-fork", "summary": "Competing repair"}], "fork"), ([{**first, "supersedes": "issue-second"}, second], "cycle"), ([first, {**second, "supersedes": "other-project-event"}], "foreign predecessor")]
+        for events, label in cases:
+            with self.subTest(label=label):
+                self._write_events(events)
+                errors = LINT.inspect_event_store(self.case_root / "AI Memory/events.jsonl")[1]
+                self.assertTrue(any("Invalid issue revision chain" in error for error in errors))
+
+    def test_canonical_history_prose_is_valid_and_legacy_folder_references_still_fail(self):
+        self._write_fixture_file("Knowledge/Project Learning.md", "# Project Learning\n\nCanonical history retains prior problems and fixes in the existing event store. Source behavior uses S3 raw/aggregate processing and raw/parsed URL validation.\n")
+        errors = LINT.inspect_vault(self.case_root)["errors"]
+        self.assertFalse(any("Legacy chronology owner" in error for error in errors))
+        self.assertFalse(any("Stale structure reference" in error for error in errors))
+        (self.case_root / "raw").mkdir()
+        errors = LINT.inspect_vault(self.case_root)["errors"]
+        self.assertIn("Legacy clutter remains: raw", errors)
+        (self.case_root / "raw").rmdir()
+        self._write_fixture_file("Knowledge/Project Learning.md", "# Project Learning\n\nSend events to History and keep History.md as the project owner.\n")
+        errors = LINT.inspect_vault(self.case_root)["errors"]
+        self.assertTrue(any("Legacy chronology owner" in error for error in errors))
+        self.assertTrue(any("Stale structure reference" in error and "History.md" in error for error in errors))
 
     def test_malformed_cache_path_is_an_integrity_error(self):
         malformed_path = self.case_root / "Cache" / "tests" / "memory-only|Cache" / "evidence.json"

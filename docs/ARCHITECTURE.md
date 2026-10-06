@@ -5,7 +5,7 @@
 | Concern | Canonical owner | Update rule |
 |---|---|---|
 | AI access contract | `AGENTS.md` | Generator-managed |
-| Current project truth | `Projects/<Project>/Knowledge.md` | User/AI maintained, no chronology |
+| Current project truth | `Projects/<Project>/Memory.json`, with `Knowledge.md` as its readable view | Exact project identity, scoped entries, no chronology |
 | Reusable engineering truth | `Knowledge/` | Promote only current reusable rules |
 | Classified reusable patterns | `Knowledge/Reusable Lessons/` | Only explicit global preferences auto-promote; project outcomes remain candidates |
 | Optional external references | `Knowledge/Book References/` | Store trigger, citation range, edition/date, and freshness; never a local path |
@@ -18,19 +18,23 @@
 
 ## Query contract
 
-Every Skill-guided task recalls the exact project through `ai_memory.py recall`: at most two relevant Knowledge sections and five compact events. Missing vaults, projects, or matches skip memory without creating files. Unscoped search requires explicit `--all-projects` audit intent. A relevant global preference or reusable pattern is optional; another project is never a fallback. It must not load all events, all projects, generated dashboards, or broad logs for an ordinary task.
+Every Skill-guided task selects one exact project. Structured owners use `project-memory-skill/scripts/project_knowledge.py recall` with the real project root, scoped filters, and source freshness checks. `ai_memory.py recall` skips structured owners; for projects without an index it returns at most two prose sections labeled unverified and never reads the event store by default. Missing vaults, projects, or matches skip without creating files. Unscoped search requires explicit `--all-projects` audit intent. Another project is never a fallback.
 
-Recall uses bounded lexical ranking with common bilingual technical terms. Module names are hints, query matches rank first, and current recall excludes events superseded within the same project. Long Knowledge sections return an excerpt around a match, with a truncation flag. Strict `search` remains an exact module/all-query-term history lookup. The response's `recall_evidence` describes only the current retrieval: inspected sources, matched terms, limits, and result counts. It does not certify comprehension, usefulness, or earlier task behavior. Explain the applicable source in the active task; do not infer memory usage from routing or scope coverage.
+Prose/history recall uses bounded lexical ranking with common bilingual technical terms. Module names are hints and query matches rank first. Historical events require explicit `--include-history`; they exclude superseded events within the selected project and are labeled historical evidence ineligible for current context. Long prose sections return a bounded excerpt with a truncation flag; explicitly marked legacy history blocks are excluded. Strict `search` remains an exact module/all-query-term history lookup. `recall_evidence` identifies this call's sources and limits, not comprehension or earlier memory use.
 
 Project-result session, task, and group fields are hashed provenance, not retrieval barriers. Matching outcomes remain recallable across sessions by project, module, working line, file, contract, symptom, or symbol. A separate model-routing system may apply relation isolation, but that policy never hides project results.
 
 ## Event contract
 
-Ending uses the user-selected model and effort only to summarize useful changes and update memory. Verification stays in the original task, with focused checks for meaningful changes and no obligatory full startup or build. No durable change means no memory write.
+Ending uses the user-selected model and effort to summarize useful changes, update current knowledge and complete due synthesis. Verification stays in the original task, with focused checks for meaningful changes and no obligatory full startup or build. A no-change closeout still checks exact-project maintenance; it writes nothing when both durable updates and synthesis are unnecessary.
 
 One durable user-visible outcome creates one event. An event records project, working line, modules, summary, reason, result, verification, decisions, risks, and touched project-relative files. Multiple modules belong in one event through repeated module changes.
 
-A repeated Bug uses one stable `issue_id`. A new attempt updates that row, changes its lifecycle status, and increments `attempt_count`.
+A repeated Bug uses one stable project-scoped `issue_id`. Each distinct attempt appends a revision with its own event ID, links the previous revision through `supersedes`, and increments `attempt_count`. Earlier causes, user corrections, failed solutions and verification remain in the same canonical chronology. Identical replays are no-ops. Issue dashboards and status-filtered search select only the latest revision; explicit historical search and recall retain earlier issue attempts. Compact history includes bounded cause, decisions, evidence and remaining risks, with truncation marked. A passing check defaults to `MONITORING`; resolving an issue requires an explicit outcome.
+
+Current project state is the last established state, with its verification date, limits, unresolved work and next step. Matching source hashes prove source identity, not current runtime or deployment status. The existing reason, result, decisions, verification and risks fields carry this continuity; no additional status log or archive is needed.
+
+The installed Project Memory writer owns structured index updates, their readable projection and event provenance. The generic event writer alone does not update that index. Sparse updates retain omitted current context, while changed claims require their own evidence and invalidate synthesis. A nonempty current project with missing or invalidated synthesis is due immediately; 20 distinct writes or 30 days also trigger maintenance. Closeout checks before and after saving, including no-change outcomes, and cannot claim memory completion while synthesis remains due. Synthesis uses eligible current facts and dated evidence limits; stale, retired or unsupported claims cannot become current by summarization. This is task-closeout maintenance, not an idle scheduler.
 
 Production writes reject placeholder-only semantics. Semantic duplicates ignore session/task/group provenance. `remove-invalid` deletes only an exact placeholder event or a duplicate proven against a retained canonical event and rejects any target referenced by a superseding result.
 
@@ -48,7 +52,7 @@ Numbered copies of generated root views are reported for review, and auxiliary J
 
 `repair-jsonl --vault VAULT --path RELATIVE_JSONL --expected-sha256 DIGEST` repairs only missing newlines between complete objects in an auxiliary store. It preserves every original byte except inserted separators, rejects the primary event store, validates the full file and confined paths before writing, and rechecks the digest under compatible file locks before atomic replacement. It does not discard malformed records or invent their contents. Main-store cleanup uses the guarded `ai_memory.py` APIs.
 
-Tests and probes use explicit disposable vaults and stores under `Cache/tmp-*/` and run Python with `-B`. A real production store is never used to prove failure behavior.
+Tests and probes use explicit disposable vaults and stores under `Cache/temp-<task>/` and run Python with `-B`. A real production store is never used to prove failure behavior.
 
 Routine execution stays hidden/headless. The package and generated vault carry the same portable `hidden_process_options` helper: Windows child processes use no-console creation and hidden startup options; macOS/Linux receive no Windows flags. Callers retain streams, exit status, timeout, and lifecycle ownership. GUI programs require their own headless mode. A parity test keeps both standalone copies aligned, and source checks cover test subprocesses as well as runtime launches.
 
