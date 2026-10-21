@@ -255,6 +255,9 @@ def _upsert_auto_block(path, category, lesson_id, lesson):
     end = f"<!-- END-AUTO-LESSON:{lesson_id} -->"
     block = f"{start}\n{lesson}\n{end}"
     pattern = re.compile(re.escape(start) + r".*?" + re.escape(end), re.DOTALL)
+    existing = pattern.search(text)
+    if existing and re.sub(r"(?m)^- Last classified:.*$", "", existing.group(0)) == re.sub(r"(?m)^- Last classified:.*$", "", block):
+        return
     updated = pattern.sub(block, text, count=1) if pattern.search(text) else text.rstrip() + "\n\n" + block + "\n"
     _write_text_atomic(path, updated)
 

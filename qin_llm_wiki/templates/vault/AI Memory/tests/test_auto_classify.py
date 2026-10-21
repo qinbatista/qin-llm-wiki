@@ -2,7 +2,9 @@ import importlib.util
 import os
 import shutil
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 
 MEMORY_ROOT = Path(__file__).parents[1]
@@ -108,6 +110,31 @@ class AutoClassifyTests(unittest.TestCase):
         matches = CLASSIFIER.recall(self.case_root, self.store, project="ProjectOne")["matches"]
         self.assertTrue(matches)
         self.assertTrue(all(row["source_projects"] == ["ProjectOne"] for row in matches))
+
+    def test_unrelated_closeouts_preserve_lesson_bytes_but_changed_evidence_updates_them(self):
+        MEMORY.record_event("Global Preferences", "ui.layout", "preference", "Prefer readable UI layout", "Explicit global user preference", "Use readable spacing and truthful button feedback", "passed", events_path=self.store)
+        with mock.patch.object(CLASSIFIER, "datetime") as clock:
+            clock.now.return_value = datetime(2026, 8, 1, tzinfo=timezone.utc)
+            CLASSIFIER.sync_catalog(self.case_root, self.store, apply=True)
+        path = self.case_root / CLASSIFIER.TAXONOMY_PATHS["ui-interaction"]
+        path.write_text(path.read_text(encoding="utf-8").replace("## Curated lessons", "## Curated lessons\n\nKeep this reviewed source contract unchanged."), encoding="utf-8")
+        original = path.read_bytes()
+        self._record_architecture_event("ProjectOne", "2026-08-02T10:00:00Z")
+        with mock.patch.object(CLASSIFIER, "datetime") as clock:
+            clock.now.return_value = datetime(2026, 8, 3, tzinfo=timezone.utc)
+            CLASSIFIER.sync_catalog(self.case_root, self.store, apply=True)
+        self.assertEqual(path.read_bytes(), original)
+        events = MEMORY._read_events(self.store)
+        next(event for event in events if event["project"] == "Global Preferences")["result"] = "Use readable spacing and explicit failed-action feedback"
+        MEMORY._write_events(events, self.store)
+        with mock.patch.object(CLASSIFIER, "datetime") as clock:
+            clock.now.return_value = datetime(2026, 8, 4, tzinfo=timezone.utc)
+            CLASSIFIER.sync_catalog(self.case_root, self.store, apply=True)
+        changed = path.read_text(encoding="utf-8")
+        self.assertNotEqual(path.read_bytes(), original)
+        self.assertIn("Keep this reviewed source contract unchanged.", changed)
+        self.assertIn("explicit failed-action feedback", changed)
+        self.assertIn("2026-08-04T00:00:00Z", changed)
 
 
 if __name__ == "__main__":

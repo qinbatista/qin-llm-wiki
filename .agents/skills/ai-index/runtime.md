@@ -5,3 +5,5 @@ Generic ai_memory.py owns canonical history, bounded legacy prose and explicit h
 The retrieval chain is project → task → underlying logic. Project Memory owns `logic` traversal of explicit shared-principle relations; generic keyword classification only proposes candidates. Selected cross-project cases remain references with conditions, differences and proof limits; they never become local facts by category or keyword overlap.
 
 Generic `search --project OWNER --event-id ID` follows a selected historical pointer by identity, retaining exact owner/module filters. A query containing an ID is text matching and cannot establish event identity. Search returns explicitly historical evidence, never eligible current facts.
+
+Unchanged promoted lesson blocks retain their bytes and classification date across unrelated closeouts. Regenerate a block when its rule or evidence changes; run timestamps belong to the candidate queue and must not invalidate unchanged curated source contracts.
