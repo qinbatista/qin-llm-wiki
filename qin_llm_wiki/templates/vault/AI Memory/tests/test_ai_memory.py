@@ -269,6 +269,14 @@ class AIMemoryTests(unittest.TestCase):
         self.assertEqual(MEMORY.search_events("GameOne", "report.export", "pdf layout missing-extra-word", events_path=self.store)["matches"], [])
         self.assertEqual(len(MEMORY.search_events("GameOne", "report.export", "pdf layout", events_path=self.store)["matches"]), 1)
         self.assertEqual(len(MEMORY.recall_project("GameOne", "report", vault_root=self.case_root, events_path=self.store, include_history=True)["matches"]), 1)
+        MEMORY.record_event("GameOne", "report.export", "documentation", "Follow-up mentions " + written["event_id"], "Keep the historical reference", "Follow-up is a different observation", "not-run", events_path=self.store)
+        exact = MEMORY.search_events("GameOne", events_path=self.store, event_id=written["event_id"])
+        self.assertEqual([row["event_id"] for row in exact["matches"]], [written["event_id"]])
+        self.assertFalse(exact["matches"][0]["eligible_current_context"])
+        self.assertEqual(exact["matches"][0]["context_role"], "historical_evidence")
+        self.assertEqual(MEMORY.search_events("GameTwo", events_path=self.store, event_id=written["event_id"])["matches"], [])
+        result = subprocess.run([sys.executable, "-B", str(SCRIPT_PATH), "--store", str(self.store), "search", "--project", "GameOne", "--event-id", written["event_id"]], capture_output=True, text=True, encoding="utf-8", timeout=20, check=True, **hidden_process_options())
+        self.assertEqual([row["event_id"] for row in json.loads(result.stdout)["matches"]], [written["event_id"]])
 
     def test_recall_chinese_partial_terms_and_short_ascii_boundaries(self):
         written = MEMORY.record_event("GameOne", "network.connection", "bug-fix", "断网重连恢复状态", "网络断开后需要恢复连接", "重连成功并恢复游戏状态", "passed", issue_id="network-reconnection", events_path=self.store)

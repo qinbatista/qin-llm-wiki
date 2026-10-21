@@ -769,9 +769,10 @@ def _event_searchable_text(event):
     return " ".join([event.get("project", ""), event.get("summary", ""), event.get("reason", ""), event.get("result", ""), event.get("event_type", ""), event.get("bug_class", ""), event.get("issue_id", ""), *modules, *module_summaries, *event.get("files", []), *event.get("decisions", []), *event.get("risks", []), *candidate_text])
 
 
-def search_events(project="", module="", query="", issue_status="", limit=5, compact=False, events_path=EVENTS_PATH, task_name="", session_id="", session_key="", task_scope_key="", task_group="", task_group_key="", all_projects=False):
+def search_events(project="", module="", query="", issue_status="", limit=5, compact=False, events_path=EVENTS_PATH, task_name="", session_id="", session_key="", task_scope_key="", task_group="", task_group_key="", all_projects=False, event_id=""):
     terms = [term for term in re.findall(r"[\w.+-]+", query.lower()) if len(term) >= 2][:12]
     normalized_project = project.strip()
+    selected_event = _single_line(event_id, "event-id", max_length=160) if event_id else ""
     if not normalized_project and not all_projects:
         raise ValueError("A project is required; use --all-projects only for an explicit memory audit")
     scope = _scope_context(normalized_project, module or "project-wide", task_name, session_id, session_key, task_scope_key, task_group, task_group_key)
@@ -780,6 +781,8 @@ def search_events(project="", module="", query="", issue_status="", limit=5, com
     current_issue_ids = {event.get("event_id") for event in _latest_issue_events(events)}
     ordered_events = [event for position, event in sorted(enumerate(events), key=lambda item: (item[1].get("last_seen") or item[1].get("recorded_at") or "", item[0]), reverse=True)]
     for event in ordered_events:
+        if selected_event and event.get("event_id") != selected_event:
+            continue
         if normalized_project and event.get("project", "").lower() != normalized_project.lower():
             continue
         module_changes = event.get("module_changes", [])
@@ -795,6 +798,8 @@ def search_events(project="", module="", query="", issue_status="", limit=5, com
         for field_name in ("session_id", "task_name", "task_group"):
             matched_event.pop(field_name, None)
         matched_event["scope_relation"] = "project_result_provenance"
+        matched_event["context_role"] = "historical_evidence"
+        matched_event["eligible_current_context"] = False
         matched_event["provenance_relation"] = _event_scope_relation(event, scope)
         matched_event = _compact_event(matched_event) if compact else matched_event
         if event.get("issue_id"):
@@ -1253,6 +1258,7 @@ def main():
     search_parser.add_argument("--all-projects", action="store_true", help="Explicit cross-project memory audit only")
     search_parser.add_argument("--module", default="")
     search_parser.add_argument("--query", default="")
+    search_parser.add_argument("--event-id", default="", help="Exact historical event identity within the selected project")
     search_parser.add_argument("--issue-status", choices=ISSUE_STATUSES, default="")
     search_parser.add_argument("--limit", type=int, default=5)
     search_parser.add_argument("--compact", action="store_true")
@@ -1289,7 +1295,7 @@ def main():
     elif arguments.command == "normalize-working-lines":
         output = normalize_working_lines(arguments.store, arguments.apply, arguments.expected_sha256)
     elif arguments.command == "search":
-        output = search_events(arguments.project, arguments.module, arguments.query, arguments.issue_status, arguments.limit, arguments.compact, arguments.store, arguments.task_name, arguments.session_id, task_group=arguments.task_group, all_projects=arguments.all_projects)
+        output = search_events(arguments.project, arguments.module, arguments.query, arguments.issue_status, arguments.limit, arguments.compact, arguments.store, arguments.task_name, arguments.session_id, task_group=arguments.task_group, all_projects=arguments.all_projects, event_id=arguments.event_id)
     elif arguments.command == "recall":
         output = recall_project(arguments.project, arguments.module, arguments.query, arguments.limit, arguments.vault, arguments.store if arguments.store != EVENTS_PATH else None, include_history=arguments.include_history)
     elif arguments.command == "render":

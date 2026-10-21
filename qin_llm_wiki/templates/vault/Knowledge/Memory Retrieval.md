@@ -32,6 +32,8 @@ Read in order: exact project → relevant task memory → underlying logic. Use 
 
 Only selected reference facts are read from their exact owner. Compare the transferable rule, applies/avoid conditions, implementation differences and dated verification. A common parallelism principle does not transfer another project's APIs, capacity, lifecycle or measured result. Current-source changes leave old cases historical. Keep structured facts, shared principles and case history in their existing owners and event store, with relations connecting them rather than duplicate memory files.
 
+Follow a historical event pointer with `AI Memory/ai_memory.py search --project OWNER --event-id ID`, not an ID placed in `--query`. The exact selector cannot substitute a later event that merely mentions that ID; returned history remains ineligible as current proof.
+
 ## Keep current pages useful
 
 Use descriptive headings for a stable feature, role, or owner. Put the current decision, relevant files or interfaces, and known limits first. Keep detailed references linked from their owner. Do not append complete task reports, duplicate chronology, or create a page for every function or date. Replace a superseded current rule while retaining useful history in the event store.
