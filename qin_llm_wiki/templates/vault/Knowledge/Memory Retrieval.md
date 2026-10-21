@@ -28,7 +28,7 @@ Ordinary structured recall requires a task module, file, symbol or meaningful qu
 
 ## Project, task and underlying logic
 
-Read in order: exact project → relevant task memory → underlying logic. Use installed `project_knowledge.py logic` with task selectors to follow `applies-logic` links to shared `logic.*` principles and related case pointers. Without a saved link, identify the causal principle from the current problem/source and select its shared owner/module explicitly. Keywords alone cannot establish equivalence.
+Read in order: exact project → relevant task memory → underlying logic. Use installed `project_knowledge.py logic` with task selectors to follow `applies-logic` links to shared `logic.*` principles and related case pointers. Stale/unverified task scopes retain reviewed logic metadata as ineligible pointers while their claims remain excluded; retired scopes supply no routes. Without a saved link, identify the causal principle from the current problem/source and select its shared owner/module explicitly. Keywords alone cannot establish equivalence.
 
 Only selected reference facts are read from their exact owner. Compare the transferable rule, applies/avoid conditions, implementation differences and dated verification. A common parallelism principle does not transfer another project's APIs, capacity, lifecycle or measured result. Current-source changes leave old cases historical. Keep structured facts, shared principles and case history in their existing owners and event store, with relations connecting them rather than duplicate memory files.
 
