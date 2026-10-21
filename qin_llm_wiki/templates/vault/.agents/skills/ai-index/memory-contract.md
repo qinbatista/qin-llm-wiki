@@ -44,4 +44,4 @@ After changed memory, render the generated views and check only the affected lin
 
 ## Task context boundary
 
-Structured recall returns only matched facts and same-module parents by default. Add `--include-project-context` only for a relevant architecture/dependency question. Never treat unavailable scoped memory as permission to read the whole generated page or a legacy mixed store. Historical evidence remains explicitly selected and dated.
+Ordinary structured recall requires a task module, file, symbol or meaningful query; it does not attach whole-project context. Explicit `--include-project-context` without selectors returns only project facts and navigation, never arbitrary module facts. Generic prose recall also requires meaningful task terms, and a query miss never selects a module-only fallback. A no-match, stale or identity skip means inspect the owning source, never a whole Knowledge page or Codex-local memory. During a requested isolation repair, replace obsolete commands in the actual caller instead of retaining them below an override sentence. History stays explicitly selected and dated.

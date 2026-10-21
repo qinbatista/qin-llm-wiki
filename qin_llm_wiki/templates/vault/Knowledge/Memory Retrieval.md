@@ -24,7 +24,7 @@ Use scoped `search` or explicit `recall --include-history` only to investigate p
 
 Issue history retains prior attempts, causes, user corrections, fixes and remaining limits. `issue_is_current` identifies the latest saved revision for that issue; status-filtered search selects only that revision. Compact history includes bounded reason, decisions, verification and risks. When `details_truncated` is true, read the needed full scoped event before relying on omitted details. A latest saved status is dated evidence, not a live deployment check.
 
-Ordinary structured recall does not attach whole-project context. Use `--include-project-context` only for a relevant architecture/dependency question. A no-match, stale or identity skip means inspect the owning source; never read the full generated Knowledge page or a Codex-local memory file as a fallback.
+Ordinary structured recall requires a task module, file, symbol or meaningful query; it does not attach whole-project context. Explicit `--include-project-context` without selectors returns only project facts and navigation, never arbitrary module facts. Generic prose recall also requires meaningful task terms, and a query miss never selects a module-only fallback. A no-match, stale or identity skip means inspect the owning source, never a whole Knowledge page or Codex-local memory. During a requested isolation repair, replace obsolete commands in the actual caller instead of retaining them below an override sentence. History stays explicitly selected and dated.
 
 ## Keep current pages useful
 

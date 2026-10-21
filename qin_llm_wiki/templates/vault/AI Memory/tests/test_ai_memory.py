@@ -235,6 +235,19 @@ class AIMemoryTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertIn("spritejob", result["sections"][0]["matched_terms"])
 
+    def test_ordinary_recall_requires_task_scope_and_query_miss_does_not_use_module_fallback(self):
+        MEMORY.add_project("GameOne", self.case_root)
+        knowledge = self.case_root / "Projects/GameOne/Knowledge.md"
+        knowledge.write_text("# GameOne\n\n## Animation\nAnimation timing has one owner.\n", encoding="utf-8")
+        MEMORY.record_event("GameOne", "animation", "operation", "Animation timing saved", "Keep timing ownership", "Timing recorded", "not-run", events_path=self.store)
+        for filters in ({}, {"query": "please"}):
+            result = MEMORY.recall_project("GameOne", vault_root=self.case_root, events_path=self.store, **filters)
+            self.assertEqual(result["reason"], "task_scope_required")
+            self.assertEqual(result["sections"], [])
+        result = MEMORY.recall_project("GameOne", "animation", "orbital telemetry", vault_root=self.case_root, events_path=self.store, include_history=True)
+        self.assertEqual(result["sections"], [])
+        self.assertEqual(result["matches"], [])
+
     def test_recall_ranks_bilingual_technical_matches_before_newer_module_only_events(self):
         relevant = MEMORY.record_event("GameOne", "render.sprite-jobs", "architecture", "Sprite animation has one owner", "Avoid competing animation writers", "Sprite jobs control the frame sequence", "passed", recorded_at="2026-08-01T10:00:00Z", events_path=self.store)
         MEMORY.record_event("GameOne", "animation", "operation", "Build documentation refreshed", "Keep command examples current", "Documentation reviewed", "passed", recorded_at="2026-08-02T10:00:00Z", events_path=self.store)

@@ -4,7 +4,7 @@ This vault helps users and AI avoid repeating project explanations and failed at
 
 ## Read
 
-- Resolve one exact project. Use `project-memory-skill/scripts/project_knowledge.py recall --project-root ROOT --vault VAULT` for structured owners and relevant module/file/symbol filters. No-match, stale or wrong-root results never authorize a whole Knowledge page, another project or Codex-local memory fallback. Project-wide context requires explicit `--include-project-context` when relevant.
+- Resolve one exact project. Use `project-memory-skill/scripts/project_knowledge.py recall --project-root ROOT --vault VAULT` for structured owners and relevant module/file/symbol filters. No-match, stale or wrong-root results never authorize a whole Knowledge page, another project or Codex-local memory fallback. Ordinary recall requires a task selector; explicit `--include-project-context` without selectors returns only project facts and navigation, never arbitrary modules.
 - Only an owner without Memory.json uses `AI Memory/ai_memory.py recall` for bounded unverified prose. History is explicit and separate; `--all-projects` is reserved for a user-requested memory audit.
 - Preserve important project contracts, user corrections, failed attempts, dated results, blockers and next steps. Update through the supported current writer, keep omitted useful facts, and reconcile superseded claims. `AI Memory/events.jsonl` is the sole chronology; Knowledge.md is a readable projection.
 - Keep project facts in their exact owner. Cross-project links are unloaded references. Shared preferences require explicitly shared intent. Disable Codex automatic memory generation and use while this vault owns memory; settings apply to future sessions.

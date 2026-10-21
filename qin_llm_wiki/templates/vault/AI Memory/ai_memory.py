@@ -886,7 +886,11 @@ def recall_project(project, module="", query="", limit=5, vault_root=VAULT_ROOT,
     structured_owner = (project_root / "Memory.json").exists()
     if structured_owner and not include_history:
         return {"status": "skipped", "reason": "structured_current_index_requires_exact_root_reader", "current_owner": f"Projects/{project}/Memory.json", "reader": "project-memory-skill/scripts/project_knowledge.py recall --project-root ROOT --vault VAULT", **empty}
-    if knowledge.is_file() and not structured_owner:
+    if not project_root.is_dir() and not include_history:
+        return {"status": "skipped", "reason": "no-related-memory", **empty}
+    if not query_terms and not module_terms and not (include_history and unfiltered):
+        return {"status": "skipped", "reason": "task_scope_required", **empty}
+    if knowledge.is_file() and not structured_owner and (query_terms or module_terms):
         evidence["sources"].append(f"Projects/{project}/Knowledge.md")
         prose = knowledge.read_text(encoding="utf-8")
         prose = re.sub(r"<!-- BEGIN LEGACY MODULE MEMORY HISTORY -->.*?<!-- END LEGACY MODULE MEMORY HISTORY -->", "", prose, flags=re.DOTALL)
@@ -898,7 +902,7 @@ def recall_project(project, module="", query="", limit=5, vault_root=VAULT_ROOT,
             heading_score, heading_matches = _recall_score(heading, query_terms)
             module_score, module_matches = _recall_score(chunk, module_terms)
             score = query_score * 4 + heading_score * 4 + module_score
-            if score or unfiltered:
+            if (query_score if query_terms else module_score):
                 ranked.append((bool(query_score), score, -index, chunk))
         for has_query_match, score, position, chunk in sorted(ranked, reverse=True)[:2]:
             excerpt = _recall_excerpt(chunk, query_terms or module_terms)
@@ -922,7 +926,7 @@ def recall_project(project, module="", query="", limit=5, vault_root=VAULT_ROOT,
         query_score, query_matches = _recall_score(searchable, query_terms)
         module_score, module_matches = _recall_score(" ".join(change.get("module", "") for change in event.get("module_changes", [])), module_terms)
         score = query_score * 4 + module_score
-        if score or unfiltered:
+        if (query_score if query_terms else module_score) or unfiltered:
             ranked_events.append((bool(query_score), score, event.get("last_seen") or event.get("recorded_at") or "", event.get("event_id", ""), event, sorted(set(query_matches + module_matches))))
     matches = []
     for has_query_match, score, timestamp, event_id, event, matched_terms in sorted(ranked_events, key=lambda item: item[:4], reverse=True)[:event_limit]:
