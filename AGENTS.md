@@ -10,3 +10,5 @@
 - Update managed contracts and runtime files only through the generator. Preserve user-owned Projects, Knowledge, Preferences, Skills, and `AI Memory/events.jsonl`.
 - Keep all AI entry pointers subordinate to the same memory contract. Capture useful scoped continuity after meaningful work; structured current writes and history writes are distinct capabilities. Project Memory closeout checks missing/invalidated synthesis and cadence, including no-change outcomes, without inventing current proof or a second memory store.
 - Definition of done: unit tests, generated-vault lint, record/search/render replay, architecture comparison, tracked-file privacy scan, package build, and clean diff all pass before publication.
+
+Read [the project AI index](.agents/skills/ai-index/SKILL.md) for focused routes and [the project testing Skill](.agents/skills/testing-skill/SKILL.md) before extended checks.

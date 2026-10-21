@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "rules": {
+    "repository": ".agents/skills/ai-index/repository.md",
+    "structure": ".agents/skills/ai-index/structure.md",
+    "verification": ".agents/skills/ai-index/verification.md"
+  },
+  "modules": [
+    {
+      "id": "runtime",
+      "summary": "Generic history/prose retrieval and integrity",
+      "document": ".agents/skills/ai-index/runtime.md",
+      "sources": [
+        "qin_llm_wiki/templates/vault/AI Memory",
+        "qin_llm_wiki/templates/vault/AGENTS.md"
+      ],
+      "dependencies": []
+    },
+    {
+      "id": "generator",
+      "summary": "Portable managed vault updates and preservation",
+      "document": ".agents/skills/ai-index/generator.md",
+      "sources": [
+        "qin_llm_wiki/cli.py",
+        "qin_llm_wiki/templates/vault/.agents",
+        "tests",
+        ".agents/skills/testing-skill"
+      ],
+      "dependencies": [
+        {
+          "module": "runtime",
+          "reason": "Generator installs and verifies the generic runtime."
+        }
+      ]
+    }
+  ]
+}

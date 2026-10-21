@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "rules": {
+    "repository": ".agents/skills/ai-index/repository.md",
+    "structure": ".agents/skills/ai-index/structure.md",
+    "verification": ".agents/skills/ai-index/verification.md"
+  },
+  "modules": [
+    {
+      "id": "memory",
+      "summary": "Exact-project recall, continuity, canonical history and safe memory updates",
+      "document": ".agents/skills/ai-index/memory-contract.md",
+      "sources": [
+        "AI Memory",
+        "Projects",
+        "Knowledge",
+        "Preferences"
+      ],
+      "dependencies": []
+    }
+  ]
+}

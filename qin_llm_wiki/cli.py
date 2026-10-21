@@ -18,6 +18,8 @@ from .hidden_process import hidden_process_options
 PACKAGE_ROOT = Path(__file__).resolve().parent
 TEMPLATE_ROOT = PACKAGE_ROOT / "templates" / "vault"
 MANAGED_FILES = ("AGENTS.md", "CLAUDE.md", "GEMINI.md", "instruction.md", "AI Memory/ai_memory.py", "AI Memory/auto_classify.py", "AI Memory/memory_lint.py", "AI Memory/hidden_process.py", "AI Memory/tests/test_ai_memory.py", "AI Memory/tests/test_auto_classify.py", "AI Memory/tests/test_memory_lint.py", "AI Memory/tests/test_hidden_process.py")
+PROJECT_GUIDANCE_FILES = ('.agents/skills/ai-index/SKILL.md', '.agents/skills/ai-index/memory-contract.md', '.agents/skills/ai-index/repository.md', '.agents/skills/ai-index/structure.md', '.agents/skills/ai-index/verification.md', '.agents/skills/ai-index/index.json')
+MANAGED_FILES = (*MANAGED_FILES, *PROJECT_GUIDANCE_FILES)
 SEED_FILES = ("Start Here.md", "Projects/index.md", "Knowledge/index.md", "Knowledge/Project Learning.md", "Knowledge/Memory Retrieval.md", "Knowledge/Privacy and Safety.md", "Knowledge/Reusable Lessons/index.md", "Knowledge/Reusable Lessons/Candidates.md", "Knowledge/Reusable Lessons/Memory and Process.md", "Knowledge/Reusable Lessons/Code Architecture.md", "Knowledge/Reusable Lessons/Game Architecture.md", "Knowledge/Reusable Lessons/UI and Interaction.md", "Knowledge/Reusable Lessons/Technology Decisions.md", "Knowledge/Reusable Lessons/Verification.md", "Knowledge/Book References/index.md", "Knowledge/Book References/Programming and Software Engineering.md", "Knowledge/Book References/Unity and Game Development.md", "Knowledge/Book References/Computer Graphics and Shaders.md", "Preferences/index.md", "Preferences/AI Captured Preferences.md", "Skills/index.md")
 REQUIRED_ROOT_ENTRIES = ("AGENTS.md", "CLAUDE.md", "GEMINI.md", "instruction.md", "Start Here.md", "Recent Work.md", "Issues.md", "Memory Dashboard.md", "AI Memory", "Projects", "Knowledge", "Preferences", "Skills")
 REQUIRED_RUNTIME_FILES = ("AI Memory/ai_memory.py", "AI Memory/auto_classify.py", "AI Memory/memory_lint.py", "AI Memory/hidden_process.py", "AI Memory/tests/test_ai_memory.py", "AI Memory/tests/test_auto_classify.py", "AI Memory/tests/test_memory_lint.py", "AI Memory/tests/test_hidden_process.py", "AI Memory/events.jsonl")
@@ -336,6 +338,9 @@ def _capability_signature(vault_path):
     runtime_text = runtime_path.read_text(encoding="utf-8") if runtime_path.is_file() else ""
     lint_text = lint_path.read_text(encoding="utf-8") if lint_path.is_file() else ""
     contract_text = contract_path.read_text(encoding="utf-8") if contract_path.is_file() else ""
+    focused_contract = vault_path / ".agents/skills/ai-index/memory-contract.md"
+    if focused_contract.is_file():
+        contract_text += "\n" + focused_contract.read_text(encoding="utf-8")
     return {"single_event_store": "AI Memory/events.jsonl" in contract_text, "auto_classification": (vault_path / "AI Memory" / "auto_classify.py").is_file() and "auto_classify.py" in contract_text, "cross_session_project_results": "project_result_provenance" in runtime_text and "not retrieval barriers" in contract_text, "guarded_exact_id_removal": "remove-invalid" in runtime_text and "remove-invalid" in contract_text, "strict_utf8_and_reachability": "inspect_markdown_reachability" in lint_text and "Unreadable UTF-8" in lint_text, "ghost_and_malformed_path_guard": "Ghost artifact remains" in lint_text and "Malformed path component" in lint_text, "reusable_lessons": (vault_path / "Knowledge" / "Reusable Lessons" / "index.md").is_file(), "book_references": (vault_path / "Knowledge" / "Book References" / "index.md").is_file()}
 
 

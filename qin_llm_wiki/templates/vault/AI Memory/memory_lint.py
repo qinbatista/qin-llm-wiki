@@ -5,6 +5,7 @@ import re
 import unicodedata
 from collections import Counter, deque
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from urllib.parse import unquote, urlsplit
 
 
 REQUIRED_PROJECT_FILES = ("index.md", "Knowledge.md")
@@ -16,7 +17,7 @@ REQUIRED_BOOK_REFERENCE_FILES = ("Knowledge/Book References/index.md", "Knowledg
 REQUIRED_OWNER_LINKS = (("Knowledge/index.md", "Knowledge/Reusable Lessons/index"), ("Knowledge/index.md", "Knowledge/Book References/index"), ("Knowledge/Reusable Lessons/index.md", "Knowledge/Reusable Lessons/Candidates"), ("Preferences/index.md", "Preferences/AI Captured Preferences"))
 MANAGED_ROOTS = ("Projects", "Preferences", "Knowledge", "Skills", "AI Memory")
 ROOT_ENTRY_FILES = ("Start Here.md", "AGENTS.md", "CLAUDE.md", "GEMINI.md", "instruction.md")
-ALLOW_EMPTY_FILES = {"AI Memory/.lock", "AI Memory/events.jsonl"}
+ALLOW_EMPTY_FILES = {"AI Memory/.lock", "AI Memory/.ending.lock", "AI Memory/Ending Recovery.json.lock", "AI Memory/events.jsonl"}
 TEXT_SUFFIXES = {".md", ".py", ".json", ".jsonl", ".canvas", ".txt", ".yaml", ".yml"}
 FORBIDDEN_PATHS = ("_System", "raw", "Journal", "Archive", "History", "LLM Wiki Home.md", "Knowledge/Activity Index.md", "Knowledge/instruction.md", "Skills/Activity Index.md", "Skills/instruction.md", "Projects/instruction.md")
 STALE_FRAGMENTS = ("_System/ai_memory.py", "_System/AI Memory", "Journal/", "Archive/", "Activity Index.md", "History.md", "LLM Wiki Home")
@@ -194,7 +195,7 @@ def inspect_managed_file_access(vault_path):
             errors.append(f"Unreadable managed file {relative_path}: {error}")
             continue
         if size == 0:
-            project_lock = path.name == ".memory.lock" and len(path.relative_to(vault_path).parts) == 3 and path.relative_to(vault_path).parts[0] == "Projects"
+            project_lock = path.name in {".memory.lock", ".EndingRecovery.lock", ".ending-recovery.lock"} and len(path.relative_to(vault_path).parts) == 3 and path.relative_to(vault_path).parts[0] == "Projects"
             if relative_path not in ALLOW_EMPTY_FILES and not project_lock:
                 errors.append(f"Empty managed file: {relative_path}")
             continue
@@ -279,6 +280,16 @@ def inspect_markdown_semantic_duplicates(vault_path):
     return errors
 
 
+def _local_markdown_target(vault_path, source_path, destination):
+    url = urlsplit(destination.strip().strip("<>"))
+    if url.scheme or url.netloc or not url.path or Path(url.path).is_absolute():
+        return None
+    candidate = source_path.parent / unquote(url.path)
+    if candidate.suffix.lower() != ".md" or not _inside_vault(vault_path, candidate) or not candidate.is_file():
+        return None
+    return candidate.resolve()
+
+
 def inspect_markdown_reachability(vault_path):
     markdown_paths = set(current_markdown_paths(vault_path))
     queue = deque(vault_path / relative_path for relative_path in ROOT_ENTRY_FILES if (vault_path / relative_path).is_file())
@@ -289,8 +300,10 @@ def inspect_markdown_reachability(vault_path):
             text = source.read_text(encoding="utf-8")
         except (OSError, UnicodeError):
             continue
-        for raw_target in WIKILINK_PATTERN.findall(_without_code(text)):
-            target = resolve_wikilink_path(vault_path, source, raw_target)
+        inspectable = _without_code(text)
+        targets = [resolve_wikilink_path(vault_path, source, value) for value in WIKILINK_PATTERN.findall(inspectable)]
+        targets.extend(_local_markdown_target(vault_path, source, value) for value in MARKDOWN_LINK_PATTERN.findall(inspectable))
+        for target in targets:
             if target in markdown_paths and target not in reachable:
                 reachable.add(target)
                 queue.append(target)
@@ -431,6 +444,41 @@ def inspect_event_store(events_path):
     return events, errors
 
 
+def inspect_current_indexes(vault_path, events):
+    """Check current provenance without loading source or another owner as context."""
+    errors = []
+    event_owners = {event.get("event_id"): event.get("project") for event in events}
+    for path in sorted((vault_path / "Projects").glob("*/Memory.json")):
+        if path.is_symlink():
+            errors.append(f"Symlinked current memory index: {_relative(vault_path, path)}")
+            continue
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        relative = _relative(vault_path, path)
+        owner = path.parent.name
+        if not isinstance(state, dict) or state.get("schema_version") != 1 or not isinstance(state.get("project"), dict) or state["project"].get("owner") != owner:
+            errors.append(f"Current memory owner mismatch: {relative}")
+            continue
+        entries = state.get("entries")
+        if not isinstance(entries, list):
+            errors.append(f"Invalid current memory entries: {relative}")
+            continue
+        identifiers = set()
+        for entry in [*entries, *([state["synthesis"]] if state.get("synthesis") else [])]:
+            if not isinstance(entry, dict):
+                errors.append(f"Invalid current memory record: {relative}")
+                continue
+            identifier = entry.get("id", "synthesis")
+            if identifier in identifiers:
+                errors.append(f"Duplicate current memory scope: {relative}:{identifier}")
+            identifiers.add(identifier)
+            if event_owners.get(entry.get("event_id")) != owner:
+                errors.append(f"Current memory provenance mismatch: {relative}:{identifier}")
+    return errors
+
+
 def inspect_vault(vault_path):
     root = Path(vault_path).expanduser().resolve()
     errors = []
@@ -481,8 +529,10 @@ def inspect_vault(vault_path):
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeError):
             continue
+        path_references = " ".join([*WIKILINK_PATTERN.findall(text), *MARKDOWN_LINK_PATTERN.findall(text), *INLINE_CODE_PATTERN.findall(text)])
         for fragment in STALE_FRAGMENTS:
-            if fragment in text:
+            reference_text = path_references if fragment.endswith("/") else text
+            if fragment in reference_text:
                 errors.append(f"Stale structure reference in {relative_path}: {fragment}")
         for fragment in LEGACY_OWNER_FRAGMENTS:
             if fragment.casefold() in text.casefold():
@@ -509,6 +559,7 @@ def inspect_vault(vault_path):
             errors.append(f"Generated view is invalid: {relative_path}")
     events, event_errors = inspect_event_store(root / "AI Memory" / "events.jsonl")
     errors.extend(event_errors)
+    errors.extend(inspect_current_indexes(root, events))
     candidates_path = root / "Knowledge" / "Reusable Lessons" / "Candidates.md"
     if candidates_path.is_file() and re.search(r"(?mi)^### .* — (?:tmp|temp|test|dummy|placeholder|todo|tbd|n/a|none)\s*$", candidates_path.read_text(encoding="utf-8")):
         errors.append("Auto-classified placeholder lesson remains in Knowledge/Reusable Lessons/Candidates.md")

@@ -76,11 +76,41 @@ class MemoryLintTests(unittest.TestCase):
         self.assertGreater(audit["reachable_pages"], 10)
 
     def test_project_writer_locks_are_runtime_files_and_other_empty_files_still_fail(self):
-        self._write_fixture_file("Projects/Example/.memory.lock", "")
+        for name in (".memory.lock", ".EndingRecovery.lock", ".ending-recovery.lock"):
+            self._write_fixture_file("Projects/Example/" + name, "")
+        self._write_fixture_file("AI Memory/Ending Recovery.json.lock", "")
         self._write_fixture_file("Projects/Example/empty-note.md", "")
         errors = LINT.inspect_managed_file_access(self.case_root)[1]
         self.assertNotIn("Empty managed file: Projects/Example/.memory.lock", errors)
         self.assertIn("Empty managed file: Projects/Example/empty-note.md", errors)
+
+    def test_local_markdown_links_make_project_guidance_reachable(self):
+        self._write_fixture_file(".agents/skills/ai-index/guide.md", "# Local guidance\n\nRead only the task's exact owner and preserve proof limits.\n")
+        path = self.case_root / "AGENTS.md"
+        path.write_text(path.read_text(encoding="utf-8") + "\n[Project guide](.agents/skills/ai-index/guide.md)\n", encoding="utf-8")
+        reachable, errors = LINT.inspect_markdown_reachability(self.case_root)
+        self.assertIn(self.case_root / ".agents/skills/ai-index/guide.md", reachable)
+        self.assertEqual(errors, [])
+        self.assertIsNone(LINT._local_markdown_target(self.case_root, path, "https://example.com/outside.md"))
+        self.assertIsNone(LINT._local_markdown_target(self.case_root, path, "../outside.md"))
+
+    def test_current_index_rejects_foreign_event_provenance(self):
+        event = self._valid_event()
+        self._write_events([event])
+        state = {"schema_version": 1, "project": {"owner": "ProjectTwo"}, "entries": [{"id": "scope-one", "event_id": event["event_id"]}], "synthesis": None}
+        self._write_fixture_file("Projects/ProjectTwo/Memory.json", json.dumps(state))
+        errors = LINT.inspect_current_indexes(self.case_root, [event])
+        self.assertEqual(errors, ["Current memory provenance mismatch: Projects/ProjectTwo/Memory.json:scope-one"])
+        state["project"]["owner"] = "ProjectOne"
+        self._write_fixture_file("Projects/ProjectOne/Memory.json", json.dumps(state))
+        (self.case_root / "Projects/ProjectTwo/Memory.json").unlink()
+        self.assertEqual(LINT.inspect_current_indexes(self.case_root, [event]), [])
+
+    def test_xcode_archive_prose_is_not_a_vault_structure_reference(self):
+        self._write_fixture_file("Knowledge/Project Learning.md", "# Build evidence\n\nOriginal Archive/IPA stays distinct from a later receipt.\n")
+        self.assertFalse(any("Stale structure reference" in error for error in LINT.inspect_vault(self.case_root)["errors"]))
+        self._write_fixture_file("Knowledge/Project Learning.md", "# Old owner\n\nUse [[Archive/Previous]] for old vault memory.\n")
+        self.assertTrue(any("Stale structure reference" in error for error in LINT.inspect_vault(self.case_root)["errors"]))
 
     def test_imported_fix_outcome_does_not_invent_an_issue_lifecycle(self):
         event = {**self._valid_event(), "event_type": "bug-fix"}
