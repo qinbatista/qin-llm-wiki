@@ -26,6 +26,12 @@ Issue history retains prior attempts, causes, user corrections, fixes and remain
 
 Ordinary structured recall requires a task module, file, symbol or meaningful query; it does not attach whole-project context. Explicit `--include-project-context` without selectors returns only project facts and navigation, never arbitrary module facts. Generic prose recall also requires meaningful task terms, and a query miss never selects a module-only fallback. A no-match, stale or identity skip means inspect the owning source, never a whole Knowledge page or Codex-local memory. During a requested isolation repair, replace obsolete commands in the actual caller instead of retaining them below an override sentence. History stays explicitly selected and dated.
 
+## Project, task and underlying logic
+
+Read in order: exact project → relevant task memory → underlying logic. Use installed `project_knowledge.py logic` with task selectors to follow `applies-logic` links to shared `logic.*` principles and related case pointers. Without a saved link, identify the causal principle from the current problem/source and select its shared owner/module explicitly. Keywords alone cannot establish equivalence.
+
+Only selected reference facts are read from their exact owner. Compare the transferable rule, applies/avoid conditions, implementation differences and dated verification. A common parallelism principle does not transfer another project's APIs, capacity, lifecycle or measured result. Current-source changes leave old cases historical. Keep structured facts, shared principles and case history in their existing owners and event store, with relations connecting them rather than duplicate memory files.
+
 ## Keep current pages useful
 
 Use descriptive headings for a stable feature, role, or owner. Put the current decision, relevant files or interfaces, and known limits first. Keep detailed references linked from their owner. Do not append complete task reports, duplicate chronology, or create a page for every function or date. Replace a superseded current rule while retaining useful history in the event store.
